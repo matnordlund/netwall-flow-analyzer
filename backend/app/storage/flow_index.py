@@ -1,0 +1,59 @@
+"""Ensure flows table has unique index for upsert (ON CONFLICT). Required for existing DBs where create_all() did not add the constraint."""
+
+from __future__ import annotations
+
+import logging
+
+from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
+
+UX_FLOWS_IDENTITY_COLS = (
+    "device",
+    "basis",
+    "from_value",
+    "to_value",
+    "proto",
+    "dest_port",
+    "src_endpoint_id",
+    "dst_endpoint_id",
+    "view_kind",
+)
+
+
+def ensure_flows_unique_index(engine) -> bool:
+    """Create unique index ux_flows_identity on flows if missing (SQLite only). Returns True if index exists or was created."""
+    if engine.dialect.name != "sqlite":
+        return True
+    identity_list = ", ".join(UX_FLOWS_IDENTITY_COLS)
+    sql = f"CREATE UNIQUE INDEX IF NOT EXISTS ux_flows_identity ON flows ({identity_list})"
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(sql))
+            conn.commit()
+        logger.info("Flows unique index ux_flows_identity ensured.")
+        return True
+    except Exception as e:  # noqa: BLE001
+        # Duplicate rows in table prevent creating the unique index
+        logger.warning(
+            "Could not create flows unique index (duplicates may exist): %s. Run: python -m scripts.dedup_flows_and_add_unique_index",
+            e,
+        )
+        return False
+
+
+def ensure_ingest_job_error_columns(engine) -> None:
+    """Add error_type and error_stage columns to ingest_jobs if missing (SQLite only). Idempotent."""
+    if engine.dialect.name != "sqlite":
+        return
+    for col, typ in [("error_type", "VARCHAR(128)"), ("error_stage", "VARCHAR(64)")]:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(f"ALTER TABLE ingest_jobs ADD COLUMN {col} {typ}"))
+                conn.commit()
+            logger.info("Added ingest_jobs.%s", col)
+        except Exception as e:  # noqa: BLE001
+            if "duplicate column name" in str(e).lower():
+                pass
+            else:
+                logger.warning("Could not add ingest_jobs.%s: %s", col, e)
