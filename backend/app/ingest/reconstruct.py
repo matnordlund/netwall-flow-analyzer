@@ -927,13 +927,13 @@ class SyslogIngestor:
                         if self.upload_collector is not None:
                             self.upload_collector.record_event(parsed.device, parsed.ts_utc)
 
-            if not batch_mode:
-                db.commit()
-                ingest_stats.touch()
-            elif self.upload_session is None:
-                # Writer path: db is a temporary session used for device id / classification only
-                db.commit()
-                ingest_stats.touch()
+            if not batch_mode or self.upload_session is None:
+                try:
+                    db.commit()
+                    ingest_stats.touch()
+                except Exception:
+                    db.rollback()
+                    raise
         except Exception as exc:  # noqa: BLE001
             ingest_stats.batch_errors += 1
             ingest_stats.touch()

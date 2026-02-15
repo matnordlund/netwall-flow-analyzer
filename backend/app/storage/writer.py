@@ -15,11 +15,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from .endpoint_lookup import get_endpoint_by_device_ip_mac
 from .models import Endpoint, Event, Flow, RawLog
 
 logger = logging.getLogger("netwall.writer")
 
-ENDPOINT_UQ = ["device", "ip", "mac"]
 FLOW_IDENTITY = [
     "device", "basis", "from_value", "to_value", "proto", "dest_port",
     "src_endpoint_id", "dst_endpoint_id", "view_kind",
@@ -127,20 +127,12 @@ class Writer:
         for (device, ip, mac, device_name) in rows:
             self._upsert_one_endpoint(session, device, ip, mac, device_name)
 
-        # Resolve ids
+        # Resolve ids (same lookup as merge: pick newest when duplicates exist)
         id_map: dict[tuple[str, str, Optional[str]], int] = {}
-        if not rows:
-            return id_map
         for (device, ip, mac, _) in rows:
-            r = session.execute(
-                select(Endpoint.id).where(
-                    Endpoint.device == device,
-                    Endpoint.ip == ip,
-                    Endpoint.mac.is_(mac) if mac is None else Endpoint.mac == mac,
-                ).limit(1)
-            ).scalar_one_or_none()
-            if r is not None:
-                id_map[(device, ip, mac)] = r
+            ep = get_endpoint_by_device_ip_mac(session, device, ip, mac)
+            if ep is not None:
+                id_map[(device, ip, mac)] = ep.id
         return id_map
 
     def _upsert_one_endpoint(
@@ -151,36 +143,22 @@ class Writer:
         mac: Optional[str],
         device_name: Optional[str],
     ) -> None:
-        table = Endpoint.__table__
-        dialect = session.get_bind().dialect.name
-        values = {
-            "device": device,
-            "ip": ip,
-            "mac": mac,
-            "device_name": device_name,
-        }
-        set_: dict = {}
-        if device_name is not None:
-            set_["device_name"] = device_name
-        if dialect == "postgresql":
-            ins = pg_insert(table).values(**values)
-            if set_:
-                stmt = ins.on_conflict_do_update(
-                    constraint="uq_endpoint_device_ip_mac",
-                    set_=set_,
-                )
-            else:
-                stmt = ins.on_conflict_do_nothing(constraint="uq_endpoint_device_ip_mac")
-        else:
-            ins = sqlite_insert(table).values(**values)
-            if set_:
-                stmt = ins.on_conflict_do_update(
-                    index_elements=ENDPOINT_UQ,
-                    set_=set_,
-                )
-            else:
-                stmt = ins.on_conflict_do_nothing(index_elements=ENDPOINT_UQ)
-        session.execute(stmt)
+        """Merge-if-exists: find by (device, ip, mac) with IS NULL for mac; update or insert.
+        Prevents duplicate rows when mac is NULL (PostgreSQL UNIQUE allows multiple NULLs)."""
+        existing = get_endpoint_by_device_ip_mac(session, device, ip, mac)
+        if existing is not None:
+            # Update only empty metadata
+            if device_name and not (existing.device_name or "").strip():
+                existing.device_name = device_name
+            return
+        session.add(
+            Endpoint(
+                device=device,
+                ip=ip,
+                mac=mac,
+                device_name=device_name,
+            )
+        )
 
     def _upsert_flows_from_events(
         self,

@@ -4,6 +4,8 @@ import logging
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..config import ClassificationPrecedence
@@ -38,36 +40,36 @@ def _record_unclassified(
     device: str,
     kind: str,
     name: Optional[str],
+    inc: int = 1,
 ) -> None:
+    """Record an unclassified (device, kind, name). Idempotent upsert: insert or increment count on conflict."""
     if not name:
         return
 
-    # 1) Check pending objects in this session (prevents duplicates in same flush)
-    for obj in list(db.new):
-        if (
-            isinstance(obj, UnclassifiedEndpoint)
-            and obj.device == device
-            and obj.kind == kind
-            and obj.name == name
-        ):
-            obj.count += 1
-            return
+    table = UnclassifiedEndpoint.__table__
+    dialect = db.get_bind().dialect.name
 
-    # 2) Check DB
-    existing = db.execute(
-        select(UnclassifiedEndpoint).where(
-            UnclassifiedEndpoint.device == device,
-            UnclassifiedEndpoint.kind == kind,
-            UnclassifiedEndpoint.name == name,
+    if dialect == "postgresql":
+        stmt = pg_insert(table).values(
+            device=device,
+            kind=kind,
+            name=name,
+            count=inc,
+        ).on_conflict_do_update(
+            index_elements=["device", "kind", "name"],
+            set_={"count": table.c.count + inc},
         )
-    ).scalar_one_or_none()
-    if existing:
-        existing.count += 1
-        return
-
-    # 3) Create and add only; do not flush. Let the outer transaction flush/commit once per batch.
-    ep = UnclassifiedEndpoint(device=device, kind=kind, name=name, count=1)
-    db.add(ep)
+    else:
+        stmt = sqlite_insert(table).values(
+            device=device,
+            kind=kind,
+            name=name,
+            count=inc,
+        ).on_conflict_do_update(
+            index_elements=["device", "kind", "name"],
+            set_={"count": table.c.count + inc},
+        )
+    db.execute(stmt)
 
 
 def derive_side_for_endpoint(

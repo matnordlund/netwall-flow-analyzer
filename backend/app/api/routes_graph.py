@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..api.device_resolve import resolve_device
 from ..ingest.reconstruct import normalize_mac as _normalize_mac
+from ..storage.endpoint_lookup import get_endpoint_by_device_ip_mac
 from ..storage.models import DeviceIdentification, DeviceOverride, Endpoint, Event, Flow, RawLog, RouterMac
 
 router = APIRouter(prefix="/graph", tags=["graph"])
@@ -58,18 +59,6 @@ def _endpoint_has_mac(ep: Optional[Endpoint]) -> bool:
     return bool(str(ep.mac).strip())
 
 
-def _get_endpoint_by_device_ip_mac(
-    db: Session, device: str, ip: Optional[str], mac: Optional[str]
-) -> Optional[Endpoint]:
-    if not ip:
-        return None
-    mac_norm = mac or None
-    stmt = select(Endpoint).where(
-        Endpoint.device == device,
-        Endpoint.ip == ip,
-        Endpoint.mac.is_(mac_norm) if mac_norm is None else Endpoint.mac == mac_norm,
-    )
-    return db.execute(stmt).scalar_one_or_none()
 
 
 def _event_matches_src(
@@ -139,7 +128,7 @@ def _build_source_breakdown_per_dest(
             return None
         key = (dev, ip, mac or None)
         if key not in ep_cache:
-            ep_cache[key] = _get_endpoint_by_device_ip_mac(db, dev, ip, mac)
+            ep_cache[key] = get_endpoint_by_device_ip_mac(db, dev, ip, mac)
         return ep_cache[key]
 
     # Key: (dst_ep_id, src_ep_id, proto, port) -> close_count, open_count, app_name_counts (for mode)
@@ -292,7 +281,7 @@ def _build_services_per_dest(
             return None
         key = (dev, ip, mac or None)
         if key not in ep_cache:
-            ep_cache[key] = _get_endpoint_by_device_ip_mac(db, dev, ip, mac)
+            ep_cache[key] = get_endpoint_by_device_ip_mac(db, dev, ip, mac)
         return ep_cache[key]
 
     # Close events: better metadata (app_name)
@@ -715,7 +704,7 @@ def _get_graph_from_events(
             return None
         key = (dev, ip, mac or None)
         if key not in ep_cache:
-            ep_cache[key] = _get_endpoint_by_device_ip_mac(db, dev, ip, mac)
+            ep_cache[key] = get_endpoint_by_device_ip_mac(db, dev, ip, mac)
         return ep_cache[key]
 
     def _event_has_dest_mac(ev: Event) -> bool:
