@@ -420,16 +420,39 @@ function EndpointNodeContent({
                           <th className="text-left px-1.5 py-1 font-medium">Dest Port</th>
                           <th className="text-left px-1.5 py-1 font-medium">App</th>
                           <th className="text-right px-1.5 py-1 font-medium">Count</th>
+                          <th className="w-7 px-0.5 py-1" title="Inspect raw logs" />
                         </tr>
                       </thead>
                       <tbody>
-                        {data.source_breakdown.flatMap((src: { source_label?: string; services?: Array<{ proto?: string; port?: number; app_name?: string | null; count?: number }> }, si: number) =>
+                        {data.source_breakdown.flatMap((src: { source_label?: string; src_ip?: string; services?: Array<{ proto?: string; port?: number; app_name?: string | null; count?: number }> }, si: number) =>
                           (src.services || []).map((svc: { proto?: string; port?: number; app_name?: string | null; count?: number }, vi: number) => (
                             <tr key={`${si}-${vi}`} className={cn('border-b border-border/50', si % 2 === 0 && 'bg-muted/20')}>
                               <td className="px-1.5 py-1">{vi === 0 ? (src.source_label ?? '—') : ''}</td>
                               <td className="px-1.5 py-1">{(svc.proto ?? 'ip').toUpperCase()}/{svc.port ?? 0}</td>
                               <td className="px-1.5 py-1">{svc.app_name != null && String(svc.app_name).trim() !== '' ? String(svc.app_name).trim() : '—'}</td>
                               <td className="px-1.5 py-1 text-right tabular-nums">{svc.count ?? 0}</td>
+                              <td className="w-7 px-0.5 py-1">
+                                {typeof data?.onInspect === 'function' && src.src_ip && data?.ip && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      data.onInspect({
+                                        source_label: src.source_label,
+                                        src_ip: src.src_ip,
+                                        proto: svc.proto ?? 'TCP',
+                                        port: svc.port ?? 0,
+                                        app_name: svc.app_name,
+                                      });
+                                    }}
+                                    className="p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                                    title="Inspect raw logs"
+                                    aria-label="Inspect raw logs"
+                                  >
+                                    <Search className="w-3 h-3" />
+                                  </button>
+                                )}
+                              </td>
                             </tr>
                           ))
                         )}
@@ -1038,7 +1061,9 @@ function InterfaceGroupNode({ data }: NodeProps) {
                               <tr className="border-b border-border text-muted-foreground">
                                 <th className="text-left px-1 py-0.5 font-medium">Source</th>
                                 <th className="text-left px-1 py-0.5 font-medium">Port</th>
+                                <th className="text-left px-1 py-0.5 font-medium">App</th>
                                 <th className="text-right px-1 py-0.5 font-medium">Count</th>
+                                <th className="w-6 px-0.5 py-0.5" title="Inspect raw logs" />
                               </tr>
                             </thead>
                             <tbody>
@@ -1047,7 +1072,30 @@ function InterfaceGroupNode({ data }: NodeProps) {
                                   <tr key={`${si}-${vi}`} className="border-b border-border/30">
                                     <td className="px-1 py-0.5">{vi === 0 ? (src.source_label ?? '—') : ''}</td>
                                     <td className="px-1 py-0.5">{(svc.proto ?? 'ip').toUpperCase()}/{svc.port ?? 0}</td>
+                                    <td className="px-1 py-0.5">{svc.app_name != null && String(svc.app_name).trim() !== '' ? String(svc.app_name).trim() : '—'}</td>
                                     <td className="px-1 py-0.5 text-right tabular-nums">{svc.count ?? 0}</td>
+                                    <td className="w-6 px-0.5 py-0.5">
+                                      {typeof dev.onInspect === 'function' && src.src_ip && dev.ip && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            dev.onInspect({
+                                              source_label: src.source_label,
+                                              src_ip: src.src_ip,
+                                              proto: svc.proto ?? 'TCP',
+                                              port: svc.port ?? 0,
+                                              app_name: svc.app_name,
+                                            });
+                                          }}
+                                          className="p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                                          title="Inspect raw logs"
+                                          aria-label="Inspect raw logs"
+                                        >
+                                          <Search className="w-3 h-3" />
+                                        </button>
+                                      )}
+                                    </td>
                                   </tr>
                                 ))
                               )}
@@ -2471,7 +2519,21 @@ function DashboardDiagram({
           dest_if: group.dest_if,
           dest_zone: group.dest_zone,
           label: group.label,
-          local_devices: localDevices,
+          local_devices: localDevices.map((dev: any) => ({
+            ...dev,
+            onInspect: dev.ip
+              ? (row: { source_label?: string; src_ip?: string; proto?: string; port?: number; app_name?: string | null }) =>
+                  setInspectModal({
+                    source_label: row.source_label ?? '',
+                    dest_label: dev.label ?? '',
+                    src_ip: row.src_ip ?? '',
+                    dest_ip: dev.ip ?? '',
+                    proto: row.proto ?? 'TCP',
+                    port: row.port ?? 0,
+                    app: (row.app_name != null && String(row.app_name).trim() !== '') ? String(row.app_name).trim() : '-',
+                  })
+              : undefined,
+          })),
           has_router: hasRouter,
           layoutHeight: igLayoutHeight,
           expandedNodeIds,
@@ -2518,6 +2580,8 @@ function DashboardDiagram({
             const isNodeExpanded = expandedNodeIds.has(n.id);
             const nodeH = estimateNodeHeight(n, isNodeExpanded, true);
             renderedNodeIds.add(n.id);
+            const destIp = n.ip ?? '';
+            const destLabel = n.label ?? '';
             nodes.push({
               id: n.id,
               position: { x: xExpanded, y: expandedY },
@@ -2542,6 +2606,15 @@ function DashboardDiagram({
                 onSetAsDest: onSetDestinationFilter ? () => onSetDestinationFilter(endpointIdFromNodeId(n.id)) : undefined,
                 isActiveSource: activeSourceEndpointId != null && activeSourceEndpointId === endpointIdFromNodeId(n.id),
                 isActiveDest: activeDestEndpointId != null && activeDestEndpointId === endpointIdFromNodeId(n.id),
+                onInspect: (row: { source_label?: string; src_ip?: string; proto?: string; port?: number; app_name?: string | null }) => setInspectModal({
+                  source_label: row.source_label ?? '',
+                  dest_label: destLabel,
+                  src_ip: row.src_ip ?? '',
+                  dest_ip: destIp,
+                  proto: row.proto ?? 'TCP',
+                  port: row.port ?? 0,
+                  app: (row.app_name != null && String(row.app_name).trim() !== '') ? String(row.app_name).trim() : '-',
+                }),
               },
               type: 'rightEndpoint',
               style: isNodeExpanded ? { zIndex: EXPANDED_NODE_ZINDEX } : { zIndex: 0 },

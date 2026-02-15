@@ -246,9 +246,17 @@ def _build_source_breakdown_per_dest(
             continue
         source_id = f"left-{src_ep_id}"
         source_label = src_ep.device_name or src_ep.ip or str(src_ep_id)
+        src_ip = (src_ep.ip or "").strip()
+        src_mac = (src_ep.mac or "").strip() or None
         services_list.sort(key=lambda x: -x["count_total"])
         services_list = services_list[:TOP_SERVICES_PER_SOURCE]
-        entry = {"source_id": source_id, "source_label": source_label, "services": services_list}
+        entry = {
+            "source_id": source_id,
+            "source_label": source_label,
+            "src_ip": src_ip,
+            "src_mac": src_mac,
+            "services": services_list,
+        }
         if dst_ep_id not in result:
             result[dst_ep_id] = []
         result[dst_ep_id].append(entry)
