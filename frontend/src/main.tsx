@@ -586,7 +586,7 @@ function ServiceNode({ id, data }: NodeProps) {
   const label = (data?.label ?? '—') as string;
   const appDisplay = data?.app != null && String(data.app).trim() !== '' ? String(data.app).trim() : '—';
   const count = Number(data?.count) ?? 0;
-  const byPair: Array<{ source_label?: string; dest_label?: string; count?: number }> = Array.isArray(data?.by_pair) ? data.by_pair : [];
+  const byPair: Array<{ source_label?: string; dest_label?: string; src_ip?: string; dest_ip?: string; count?: number }> = Array.isArray(data?.by_pair) ? data.by_pair : [];
 
   return (
     <>
@@ -625,6 +625,7 @@ function ServiceNode({ id, data }: NodeProps) {
                     <th className="text-left px-1.5 py-1 font-medium">Source</th>
                     <th className="text-left px-1.5 py-1 font-medium">Destination</th>
                     <th className="text-right px-1.5 py-1 font-medium">Count</th>
+                    <th className="w-7 px-0.5 py-1" title="Inspect raw logs" />
                   </tr>
                 </thead>
                 <tbody>
@@ -633,6 +634,13 @@ function ServiceNode({ id, data }: NodeProps) {
                       <td className="px-1.5 py-1 truncate max-w-[80px]" title={row.source_label ?? '—'}>{row.source_label ?? '—'}</td>
                       <td className="px-1.5 py-1 truncate max-w-[80px]" title={row.dest_label ?? '—'}>{row.dest_label ?? '—'}</td>
                       <td className="px-1.5 py-1 text-right tabular-nums">{row.count ?? 0}</td>
+                      <td className="w-7 px-0.5 py-1">
+                        {typeof data?.onInspect === 'function' && row.src_ip && row.dest_ip && (
+                          <button type="button" onClick={(e) => { e.stopPropagation(); data.onInspect(row); }} className="p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground" title="Inspect raw logs" aria-label="Inspect raw logs">
+                            <Search className="w-3 h-3" />
+                          </button>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -729,7 +737,7 @@ function ServiceAppNode({ id, data }: NodeProps) {
   const label = (data?.label ?? '—') as string;
   const count = Number(data?.count) ?? 0;
   const destIpCount = data?.dest_ip_count != null ? Number(data.dest_ip_count) : undefined;
-  const byPair: Array<{ source_label?: string; dest_label?: string; count?: number }> = Array.isArray(data?.by_pair) ? data.by_pair : [];
+  const byPair: Array<{ source_label?: string; dest_label?: string; src_ip?: string; dest_ip?: string; count?: number }> = Array.isArray(data?.by_pair) ? data.by_pair : [];
 
   const [page, setPage] = useState(1);
 
@@ -805,6 +813,7 @@ function ServiceAppNode({ id, data }: NodeProps) {
                     <th className="text-left px-2 py-1 font-medium w-[180px]">Source</th>
                     <th className="text-left px-2 py-1 font-medium w-[200px]">Destination</th>
                     <th className="text-right px-2 py-1 font-medium w-[80px]">Count</th>
+                    <th className="w-8 px-1 py-1" title="Inspect raw logs" />
                   </tr>
                 </thead>
                 <tbody>
@@ -813,6 +822,19 @@ function ServiceAppNode({ id, data }: NodeProps) {
                       <td className="px-2 py-1 w-[180px] min-w-[180px] whitespace-nowrap" title={row.source_label ?? '—'}>{row.source_label ?? '—'}</td>
                       <td className="px-2 py-1 w-[200px] min-w-[200px] whitespace-nowrap" title={row.dest_label ?? '—'}>{row.dest_label ?? '—'}</td>
                       <td className="px-2 py-1 w-[80px] min-w-[80px] text-right tabular-nums whitespace-nowrap">{row.count ?? 0}</td>
+                      <td className="w-8 px-1 py-1">
+                        {typeof data?.onInspect === 'function' && row.src_ip && row.dest_ip && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); data.onInspect(row); }}
+                            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                            title="Inspect raw logs"
+                            aria-label="Inspect raw logs"
+                          >
+                            <Search className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1845,6 +1867,199 @@ function DashboardPage({
   );
 }
 
+/* ── Inspect logs modal (raw logs for a service + source + destination row) ── */
+function InspectLogsModal({
+  open,
+  onClose,
+  device,
+  timeFrom,
+  timeTo,
+  view,
+  proto,
+  port,
+  appName,
+  sourceLabel,
+  destLabel,
+  srcIp,
+  destIp,
+}: {
+  open: boolean;
+  onClose: () => void;
+  device: string;
+  timeFrom: string | null;
+  timeTo: string | null;
+  view: string;
+  proto: string;
+  port: number;
+  appName: string;
+  sourceLabel: string;
+  destLabel: string;
+  /** Canonical source IP for API (required; use label only for display) */
+  srcIp: string;
+  /** Canonical destination IP for API (required) */
+  destIp: string;
+}) {
+  const [page, setPage] = useState(0);
+  const limit = 100;
+  const offset = page * limit;
+
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ['graph/inspect-logs', device, timeFrom, timeTo, view, proto, port, appName, srcIp, destIp, offset, limit],
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        device,
+        view,
+        proto: proto || 'TCP',
+        dest_port: String(port),
+        src_ip: srcIp || '',
+        dest_ip: destIp || '',
+        limit: String(limit),
+        offset: String(offset),
+      });
+      if (timeFrom) params.set('time_from', timeFrom);
+      if (timeTo) params.set('time_to', timeTo);
+      if (appName && appName !== '-' && appName.trim()) params.set('app_name', appName.trim());
+      const res = await fetch(`${API}/graph/inspect-logs?${params}`);
+      if (!res.ok) throw new Error(await res.text() || 'Failed to load logs');
+      return res.json();
+    },
+    enabled: open && !!device && !!timeFrom && !!timeTo && !!srcIp && !!destIp,
+  });
+
+  const rows: any[] = data?.rows ?? [];
+  const total: number = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+
+  React.useEffect(() => {
+    if (open) setPage(0);
+  }, [open, srcIp, destIp, proto, port]);
+
+  if (!open) return null;
+
+  const title = `Raw logs: ${sourceLabel ?? '—'} → ${destLabel ?? '—'} (${proto ?? 'TCP'}/${port ?? 0}${appName && appName !== '-' ? `, app: ${appName}` : ''})`;
+
+  return (
+    <div className="fixed inset-0 z-[2000] flex items-center justify-center p-4 bg-black/50" onClick={onClose}>
+      <div
+        className="bg-card border border-border rounded-xl shadow-xl max-w-4xl w-full max-h-[85vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <h2 className="text-sm font-semibold text-foreground truncate pr-4" title={title}>{title}</h2>
+          <button type="button" onClick={onClose} className="p-1.5 rounded-md hover:bg-muted text-muted-foreground" aria-label="Close">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-auto p-4 min-h-0">
+          {isLoading && (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+            </div>
+          )}
+          {isError && (
+            <div className="py-6 text-center text-destructive text-sm">
+              {(error as Error)?.message ?? 'Failed to load raw logs.'}
+            </div>
+          )}
+          {!isLoading && !isError && rows.length === 0 && (
+            <p className="text-sm text-muted-foreground py-6 text-center">No raw logs found for this selection.</p>
+          )}
+          {!isLoading && !isError && rows.length > 0 && (
+            <>
+              <div className="overflow-auto rounded border border-border">
+                <table className="w-full text-xs border-collapse">
+                  <thead className="sticky top-0 bg-muted/90">
+                    <tr className="text-left text-muted-foreground">
+                      <th className="px-2 py-1.5 font-medium">Time</th>
+                      <th className="px-2 py-1.5 font-medium">Event</th>
+                      <th className="px-2 py-1.5 font-medium">Src (ip:port)</th>
+                      <th className="px-2 py-1.5 font-medium">Dst (ip:port)</th>
+                      <th className="px-2 py-1.5 font-medium">Rule</th>
+                      <th className="px-2 py-1.5 font-medium">App</th>
+                      <th className="px-2 py-1.5 font-medium">Bytes</th>
+                      <th className="px-2 py-1.5 font-medium w-16">Raw</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r: any, i: number) => (
+                      <InspectLogRow key={r.ts_utc + String(i)} row={r} />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between gap-2 mt-3 text-xs text-muted-foreground">
+                  <span>Page {page + 1} of {totalPages} ({total} total)</span>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      disabled={page <= 0}
+                      onClick={() => setPage((p) => Math.max(0, p - 1))}
+                      className="px-2 py-1 rounded border border-border hover:bg-muted disabled:opacity-50 disabled:pointer-events-none"
+                    >
+                      Prev
+                    </button>
+                    <button
+                      type="button"
+                      disabled={page >= totalPages - 1}
+                      onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                      className="px-2 py-1 rounded border border-border hover:bg-muted disabled:opacity-50 disabled:pointer-events-none"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InspectLogRow({ row }: { row: any }) {
+  const [expandRaw, setExpandRaw] = useState(false);
+  const raw = row.raw_line ?? '';
+  const fmtTs = (s: string | null) => {
+    if (!s) return '—';
+    try { return new Date(s).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'medium' }); } catch { return s; }
+  };
+  return (
+    <>
+      <tr className="border-b border-border/50 hover:bg-muted/30">
+        <td className="px-2 py-1 whitespace-nowrap">{fmtTs(row.ts_utc)}</td>
+        <td className="px-2 py-1">{row.event_type ?? '—'}</td>
+        <td className="px-2 py-1 font-mono">{row.src_ip ?? '—'}:{row.src_port ?? '—'}</td>
+        <td className="px-2 py-1 font-mono">{row.dest_ip ?? '—'}:{row.dest_port ?? '—'}</td>
+        <td className="px-2 py-1 truncate max-w-[120px]" title={row.rule ?? ''}>{row.rule ?? '—'}</td>
+        <td className="px-2 py-1">{row.app_name ?? '—'}</td>
+        <td className="px-2 py-1 tabular-nums">{(row.bytes_orig ?? 0)}+{(row.bytes_term ?? 0)}</td>
+        <td className="px-2 py-1">
+          {raw ? (
+            <button
+              type="button"
+              onClick={() => setExpandRaw((e) => !e)}
+              className="text-[10px] text-primary hover:underline"
+            >
+              {expandRaw ? 'Collapse' : 'View'}
+            </button>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </td>
+      </tr>
+      {expandRaw && raw ? (
+        <tr>
+          <td colSpan={8} className="px-2 py-1 bg-muted/40 font-mono text-[10px] break-all whitespace-pre-wrap align-top">
+            {raw}
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
 /* ── Dashboard Diagram ── */
 function DashboardDiagram({
   data,
@@ -1872,6 +2087,16 @@ function DashboardDiagram({
   const [expandedServicePorts, setExpandedServicePorts] = useState<Set<string>>(new Set());
   const [showAllSources, setShowAllSources] = useState(false);
   const [expandedLeftRouter, setExpandedLeftRouter] = useState(false);
+  /** Inspect raw logs modal: row from "By source & destination" (canonical src_ip/dest_ip for API) */
+  const [inspectModal, setInspectModal] = useState<{
+    source_label: string;
+    dest_label: string;
+    src_ip: string;
+    dest_ip: string;
+    proto: string;
+    port: number;
+    app: string;
+  } | null>(null);
   /** Measured node dimensions for layout (firewall width drives right-column X) */
   const [nodeSizes, setNodeSizes] = useState<Record<string, { w: number; h: number }>>({});
   const reactFlowRef = React.useRef<any>(null);
@@ -1922,12 +2147,20 @@ function DashboardDiagram({
   }, []);
 
   const { nodes, edges, sourcesSummary } = React.useMemo(() => {
-    const left: any[] = data.left_nodes || [];
+    // Defensive dedupe by node id (last wins) so ReactFlow never sees duplicate ids (e.g. HA graph)
+    const dedupeNodesById = (arr: any[]): any[] => {
+      const byId = new Map<string, any>();
+      for (const n of arr) {
+        if (n?.id != null) byId.set(String(n.id), n);
+      }
+      return [...byId.values()];
+    };
+    const left: any[] = dedupeNodesById(data.left_nodes || []);
     const interfaceGroups = data.interface_groups || [];
     const routerLeft = data.router_bucket_left || {};
     const leftCount = routerLeft.count ?? 0;
     const apiEdges: any[] = data.edges || [];
-    const hiddenNodesLeft: any[] = routerLeft.hidden_nodes || [];
+    const hiddenNodesLeft: any[] = dedupeNodesById(routerLeft.hidden_nodes || []);
     const hiddenEdgesLeft: any[] = routerLeft.hidden_edges || [];
     const hiddenNodeIdsLeft = new Set<string>(routerLeft.hidden_node_ids || []);
 
@@ -2176,6 +2409,15 @@ function DashboardDiagram({
                 isExpanded: appExpanded,
                 layoutHeight: layoutH,
                 onToggle: () => toggleNodeExpanded(an.id),
+                onInspect: (row: { source_label?: string; dest_label?: string; src_ip?: string; dest_ip?: string; count?: number }) => setInspectModal({
+                  source_label: row.source_label ?? row.src_label ?? '',
+                  dest_label: row.dest_label ?? '',
+                  src_ip: row.src_ip ?? '',
+                  dest_ip: row.dest_ip ?? '',
+                  proto: ad.proto ?? 'TCP',
+                  port: ad.port ?? 0,
+                  app: ad.appKey ?? '-',
+                }),
               },
               type: 'serviceAppNode',
               style: appExpanded ? { zIndex: EXPANDED_NODE_ZINDEX } : { zIndex: 0 },
@@ -2480,6 +2722,23 @@ function DashboardDiagram({
         <Background gap={20} size={1} />
         <Controls showInteractive={false} />
       </ReactFlow>
+      {inspectModal && (
+        <InspectLogsModal
+          open={!!inspectModal}
+          onClose={() => setInspectModal(null)}
+          device={device}
+          timeFrom={data?.meta?.time_from ?? null}
+          timeTo={data?.meta?.time_to ?? null}
+          view={data?.meta?.view ?? 'original'}
+          proto={inspectModal.proto}
+          port={inspectModal.port}
+          appName={inspectModal.app}
+          sourceLabel={inspectModal.source_label}
+          destLabel={inspectModal.dest_label}
+          srcIp={inspectModal.src_ip}
+          destIp={inspectModal.dest_ip}
+        />
+      )}
     </div>
   );
 }
@@ -4110,7 +4369,7 @@ function EndpointsPage() {
                     type="text"
                     value={searchInput}
                     onChange={(e) => setSearchInput(e.target.value)}
-                    placeholder="Filter devices…"
+                    placeholder="Filter by name, IP, MAC, vendor, type, OS…"
                     className="h-9 pl-8 pr-3 w-56 rounded-lg border border-border bg-input text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/50 focus:border-ring"
                   />
                 </div>

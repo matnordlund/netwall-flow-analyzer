@@ -96,6 +96,15 @@ The backend is configured via **command-line arguments** (and optionally environ
 
 See `.env.example` for suggested environment variable names if you use a process manager or Docker.
 
+## Settings
+
+Application settings are stored in the database and can be changed via the web UI (Settings) or the API (`GET/PUT /api/settings/...`). They affect behaviour as follows.
+
+| Setting | Default | Effect |
+|--------|---------|--------|
+| **log_retention** | `enabled: true`, `keep_days: 3` | When enabled, a scheduled cleanup job deletes events and raw logs older than `keep_days` days. **Retention applies only to firewalls that receive live UDP syslog.** Data for firewalls that have only been populated via file import is never purged by retention; only devices that have sent syslog to this analyzer are considered for cleanup. |
+| **local_networks** | `enabled: true`, `cidrs: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]` | Defines which CIDR ranges are treated as “local”. On the Device Inventory page, the “Local only” toggle filters the list to endpoints whose IP falls within these ranges. You can enable/disable the filter and edit the list of CIDRs. |
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

@@ -678,23 +678,57 @@ def list_known_endpoints(
             )
         )
 
-        # ── Search filter (applied to aggregated columns) ──
+        # ── Search filter (applied to aggregated columns + enriched vendor/type/os from device_identifications and overrides) ──
         search = q.strip()
         if search:
             like_pat = f"%{search}%"
-            joined = joined.where(
-                or_(
-                    ep_agg.c.ep_hostname.ilike(like_pat),
-                    ep_agg.c.ep_device_name.ilike(like_pat),
-                    ep_agg.c.ep_ip.ilike(like_pat),
-                    ep_agg.c.mac_norm.ilike(like_pat),
-                    ep_agg.c.ep_vendor.ilike(like_pat),
-                    ep_agg.c.ep_type_name.ilike(like_pat),
-                    ep_agg.c.ep_os_name.ilike(like_pat),
-                    ep_agg.c.ep_brand.ilike(like_pat),
-                    ep_agg.c.ep_model.ilike(like_pat),
-                )
-            )
+            search_conditions = [
+                ep_agg.c.ep_hostname.ilike(like_pat),
+                ep_agg.c.ep_device_name.ilike(like_pat),
+                ep_agg.c.ep_ip.ilike(like_pat),
+                ep_agg.c.mac_norm.ilike(like_pat),
+                ep_agg.c.ep_vendor.ilike(like_pat),
+                ep_agg.c.ep_type_name.ilike(like_pat),
+                ep_agg.c.ep_os_name.ilike(like_pat),
+                ep_agg.c.ep_brand.ilike(like_pat),
+                ep_agg.c.ep_model.ilike(like_pat),
+            ]
+            # Include MACs that match via device_identifications or device_overrides (enriched vendor/type/os)
+            di_macs = [
+                r[0] for r in db.execute(
+                    select(DeviceIdentification.srcmac).where(
+                        DeviceIdentification.firewall_device.in_(device_list),
+                        or_(
+                            DeviceIdentification.device_vendor.ilike(like_pat),
+                            DeviceIdentification.device_type_name.ilike(like_pat),
+                            DeviceIdentification.device_os_name.ilike(like_pat),
+                            DeviceIdentification.device_brand.ilike(like_pat),
+                            DeviceIdentification.device_model.ilike(like_pat),
+                        ),
+                    ).distinct()
+                ).all()
+                if r[0]
+            ]
+            ov_macs = [
+                r[0] for r in db.execute(
+                    select(DeviceOverride.mac).where(
+                        DeviceOverride.firewall_device.in_(device_list),
+                        or_(
+                            DeviceOverride.override_vendor.ilike(like_pat),
+                            DeviceOverride.override_type_name.ilike(like_pat),
+                            DeviceOverride.override_os_name.ilike(like_pat),
+                            DeviceOverride.override_brand.ilike(like_pat),
+                            DeviceOverride.override_model.ilike(like_pat),
+                            DeviceOverride.comment.ilike(like_pat),
+                        ),
+                    ).distinct()
+                ).all()
+                if r[0]
+            ]
+            enriched_macs = list(dict.fromkeys(di_macs + ov_macs))
+            if enriched_macs:
+                search_conditions.append(ep_agg.c.mac_norm.in_(enriched_macs))
+            joined = joined.where(or_(*search_conditions))
 
         # ── Local-only CIDR filter ──
         # Resolve whether to apply: explicit param > stored setting
@@ -752,11 +786,16 @@ def list_known_endpoints(
             "first_seen": first_seen_col,
             "last_seen": last_seen_col,
         }
+        # String columns: nulls last when asc, nulls first when desc
+        _SORT_NULLS_LAST = {"vendor", "type", "os", "name"}
 
         order_clauses = []
         if sort_by in _SORT_MAP:
             col = _SORT_MAP[sort_by]
-            order_clauses.append(col.desc() if direction == "desc" else col.asc())
+            if direction == "desc":
+                order_clauses.append(col.desc().nulls_first() if sort_by in _SORT_NULLS_LAST else col.desc())
+            else:
+                order_clauses.append(col.asc().nulls_last() if sort_by in _SORT_NULLS_LAST else col.asc())
 
         if not order_clauses:
             order_clauses.append(ep_agg.c.ep_id.desc())
@@ -843,11 +882,11 @@ def list_known_endpoints(
                 "first_seen": _iso(r.first_seen),
                 "last_seen": _iso(r.last_seen),
                 "seen_count": r.seen_count or 0,
-                "vendor": vendor,
-                "type_name": type_name,
-                "os_name": os_name,
-                "brand": brand,
-                "model": model,
+                "vendor": (vendor or "").strip() if vendor else "",
+                "type_name": (type_name or "").strip() if type_name else "",
+                "os_name": (os_name or "").strip() if os_name else "",
+                "brand": (brand or "").strip() if brand else "",
+                "model": (model or "").strip() if model else "",
                 "has_override": has_override,
                 "comment": (ov.comment or None) if ov else None,
             })

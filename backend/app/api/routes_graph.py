@@ -4,12 +4,13 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Query, Request
-from sqlalchemy import select
+from fastapi import APIRouter, HTTPException, Query, Request
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.orm import Session
 
 from ..api.device_resolve import resolve_device
-from ..storage.models import DeviceIdentification, DeviceOverride, Endpoint, Event, Flow, RouterMac
+from ..ingest.reconstruct import normalize_mac as _normalize_mac
+from ..storage.models import DeviceIdentification, DeviceOverride, Endpoint, Event, Flow, RawLog, RouterMac
 
 router = APIRouter(prefix="/graph", tags=["graph"])
 
@@ -34,6 +35,18 @@ def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _canonical_endpoint_key(side: str, ip: Optional[str], mac: Optional[str]) -> str:
+    """Stable node key for an endpoint when aggregating HA members. Same (ip, mac) => same key.
+    Use for left/right nodes so the same endpoint from Master and Slave merges into one."""
+    norm_mac = _normalize_mac(mac) if mac and str(mac).strip() else None
+    if norm_mac:
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", norm_mac)
+        return f"{side}:mac:{safe}"
+    ip_val = (ip or "").strip() or "unknown"
+    safe_ip = re.sub(r"[^a-zA-Z0-9._-]", "_", ip_val)
+    return f"{side}:ip:{safe_ip}"
 
 
 def _endpoint_has_mac(ep: Optional[Endpoint]) -> bool:
@@ -467,6 +480,120 @@ def get_graph(
         db.close()
 
 
+def _is_valid_ip(s: str) -> bool:
+    """Return True if s is a valid IPv4 or IPv6 address."""
+    if not s or not str(s).strip():
+        return False
+    try:
+        import ipaddress
+        ipaddress.ip_address(str(s).strip())
+        return True
+    except ValueError:
+        return False
+
+
+@router.get("/inspect-logs")
+def get_inspect_logs(
+    request: Request,
+    device: str = Query(..., description="Firewall device or ha:base"),
+    time_from: Optional[datetime] = Query(None, description="ISO8601"),
+    time_to: Optional[datetime] = Query(None, description="ISO8601"),
+    view: str = Query("original", pattern="^(original|translated)$"),
+    proto: str = Query(..., description="TCP or UDP"),
+    dest_port: int = Query(..., ge=0, le=65535),
+    app_name: Optional[str] = Query(None),
+    src_ip: str = Query(..., description="Source IP (required; must be a valid IP address)"),
+    dest_ip: str = Query(..., description="Destination IP (required; must be a valid IP address)"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> Dict[str, Any]:
+    """Return raw event rows (and raw log line when available) for a given service + source + destination.
+    Uses same view logic as graph: original = src_ip/dest_ip/dest_port, translated = xlat_* where present.
+    """
+    if not _is_valid_ip(src_ip):
+        raise HTTPException(status_code=400, detail="src_ip must be a valid IP address")
+    if not _is_valid_ip(dest_ip):
+        raise HTTPException(status_code=400, detail="dest_ip must be a valid IP address")
+    db = get_db(request)
+    try:
+        device_list, _ = resolve_device(db, device)
+        if not device_list:
+            return {"rows": [], "total": 0}
+        time_from = _ensure_utc(time_from)
+        time_to = _ensure_utc(time_to)
+        if time_from is None or time_to is None:
+            return {"rows": [], "total": 0}
+
+        proto_upper = (proto or "").strip().upper() or "TCP"
+        stmt = (
+            select(Event)
+            .where(Event.device.in_(device_list))
+            .where(Event.ts_utc >= time_from)
+            .where(Event.ts_utc <= time_to)
+            .where(Event.event_type.in_({"conn_open", "conn_open_natsat", "conn_close", "conn_close_natsat"}))
+        )
+        if view == "translated":
+            stmt = stmt.where(
+                or_(Event.xlat_src_ip == src_ip, Event.src_ip == src_ip),
+                or_(Event.xlat_dest_ip == dest_ip, Event.dest_ip == dest_ip),
+                or_(Event.xlat_dest_port == dest_port, Event.dest_port == dest_port),
+            )
+        else:
+            stmt = stmt.where(Event.src_ip == src_ip, Event.dest_ip == dest_ip, Event.dest_port == dest_port)
+        stmt = stmt.where((Event.proto == proto_upper) | (Event.proto.is_(None)))
+        if app_name and str(app_name).strip():
+            stmt = stmt.where((Event.app_name == app_name) | (Event.app_name == str(app_name).strip()))
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total: int = db.execute(count_stmt).scalar() or 0
+        stmt = stmt.order_by(Event.ts_utc.desc()).offset(offset).limit(limit)
+        events: List[Event] = db.execute(stmt).scalars().all()
+
+        # Optional: attach raw_record from raw_logs by (device, ts_utc)
+        raw_by_key: Dict[Tuple[str, datetime], str] = {}
+        if events:
+            keys = [(e.device, e.ts_utc) for e in events]
+            raw_stmt = select(RawLog.device, RawLog.ts_utc, RawLog.raw_record).where(
+                tuple_(RawLog.device, RawLog.ts_utc).in_(keys)
+            )
+            for row in db.execute(raw_stmt).all():
+                if row[2]:
+                    raw_by_key[(row[0], row[1])] = row[2]
+
+        def _iso(dt: Optional[datetime]) -> Optional[str]:
+            if dt is None:
+                return None
+            if hasattr(dt, "isoformat"):
+                return dt.isoformat()
+            return str(dt)
+
+        rows: List[Dict[str, Any]] = []
+        for e in events:
+            raw_line = raw_by_key.get((e.device, e.ts_utc))
+            rows.append({
+                "ts_utc": _iso(e.ts_utc),
+                "device": e.device,
+                "event_type": e.event_type or "",
+                "proto": (e.proto or "").upper(),
+                "src_ip": e.src_ip,
+                "src_port": e.src_port,
+                "dest_ip": e.dest_ip,
+                "dest_port": e.dest_port,
+                "recv_if": e.recv_if,
+                "recv_zone": e.recv_zone,
+                "dest_if": e.dest_if,
+                "dest_zone": e.dest_zone,
+                "rule": e.rule,
+                "app_name": e.app_name,
+                "bytes_orig": e.bytes_orig,
+                "bytes_term": e.bytes_term,
+                "duration_s": e.duration_s,
+                "raw_line": raw_line,
+            })
+        return {"rows": rows, "total": total}
+    finally:
+        db.close()
+
+
 def _app_name_by_flow_from_close(
     db: Session,
     device_list: List[str],
@@ -839,10 +966,26 @@ def _get_graph_from_events(
         return bool(mac and mac in router_src_macs)
 
     # ── Compute seen_count per source endpoint (same metric as Endpoints "Seen") ──
-    # Sum of all event records where this endpoint appears as source across all dst pairs
     src_seen_count: Dict[int, int] = {}
     for (src_id, dst_id), row in agg.items():
         src_seen_count[src_id] = src_seen_count.get(src_id, 0) + row["count_open"]
+
+    ha_mode = len(device_list) > 1
+    canonical_by_src_id: Dict[int, str] = {}
+    rep_left_by_canonical: Dict[str, Endpoint] = {}
+    left_hidden_canonical_keys: set[str] = set()
+
+    if ha_mode:
+        for (src_id, dst_id), _ in agg.items():
+            src_ep = endpoints.get(src_id)
+            if not src_ep:
+                continue
+            ck = _canonical_endpoint_key("left", src_ep.ip, src_ep.mac)
+            canonical_by_src_id[src_id] = ck
+            if ck not in rep_left_by_canonical:
+                rep_left_by_canonical[ck] = src_ep
+            if _is_src_router_mac(src_ep) or src_ep.id not in src_ep_ids_with_mac:
+                left_hidden_canonical_keys.add(ck)
 
     # ── Left nodes ──
     left_nodes: List[Dict[str, Any]] = []
@@ -851,22 +994,45 @@ def _get_graph_from_events(
     router_left_hidden: List[str] = []
     left_hidden_edges: List[Dict[str, Any]] = []
 
-    for (src_id, dst_id), _ in agg.items():
-        src_ep = endpoints.get(src_id)
-        if not src_ep:
-            continue
-        # Router MAC rule: endpoints whose MAC is flagged always go to router bucket
-        if _is_src_router_mac(src_ep) or src_ep.id not in src_ep_ids_with_mac:
-            if src_ep.id not in left_hidden_ep_ids:
-                router_left_hidden.append(f"left-{src_ep.id}")
-                left_hidden_ep_ids.add(src_ep.id)
-        elif src_ep.id not in left_seen:
-            node = build_node(src_ep, "left")
-            node["seen_count"] = src_seen_count.get(src_ep.id, 0)
+    if ha_mode:
+        for ck, rep_ep in rep_left_by_canonical.items():
+            if ck in left_hidden_canonical_keys:
+                continue
+            node = build_node(rep_ep, "left")
+            node["id"] = ck
+            node["seen_count"] = sum(
+                src_seen_count.get(sid, 0)
+                for sid, key in canonical_by_src_id.items()
+                if key == ck
+            )
             left_nodes.append(node)
-            left_seen[src_ep.id] = f"left-{src_ep.id}"
+        for src_id in canonical_by_src_id:
+            left_seen[src_id] = canonical_by_src_id[src_id]
+        router_left_hidden = list(left_hidden_canonical_keys)
+        hidden_nodes_left = []
+        for ck in left_hidden_canonical_keys:
+            rep = rep_left_by_canonical.get(ck)
+            if rep:
+                n = build_node(rep, "left")
+                n["id"] = ck
+                hidden_nodes_left.append(n)
+        left_hidden_ep_ids = set()  # unused when ha_mode for "if src_ep.id in left_hidden_ep_ids"; we use canonical
+    else:
+        for (src_id, dst_id), _ in agg.items():
+            src_ep = endpoints.get(src_id)
+            if not src_ep:
+                continue
+            if _is_src_router_mac(src_ep) or src_ep.id not in src_ep_ids_with_mac:
+                if src_ep.id not in left_hidden_ep_ids:
+                    router_left_hidden.append(f"left-{src_ep.id}")
+                    left_hidden_ep_ids.add(src_ep.id)
+            elif src_ep.id not in left_seen:
+                node = build_node(src_ep, "left")
+                node["seen_count"] = src_seen_count.get(src_ep.id, 0)
+                left_nodes.append(node)
+                left_seen[src_ep.id] = f"left-{src_ep.id}"
 
-    hidden_nodes_left = [build_node(endpoints[eid], "left") for eid in left_hidden_ep_ids if eid in endpoints]
+        hidden_nodes_left = [build_node(endpoints[eid], "left") for eid in left_hidden_ep_ids if eid in endpoints]
 
     def _iso(dt: Any) -> Optional[str]:
         return dt.isoformat() if dt and hasattr(dt, "isoformat") else None
@@ -926,7 +1092,17 @@ def _get_graph_from_events(
                 dst_ep = endpoints.get(dst_id)
                 src_label = (src_ep.device_name or src_ep.ip or str(src_id)) if src_ep else str(src_id)
                 dst_label = (dst_ep.device_name or dst_ep.ip or str(dst_id)) if dst_ep else str(dst_id)
-                by_pair.append({"source_label": src_label, "dest_label": dst_label, "count": cnt})
+                src_ip = (src_ep.ip or "").strip() if src_ep else ""
+                src_mac = (src_ep.mac or "").strip() if src_ep else ""
+                dest_ip = (dst_ep.ip or "").strip() if dst_ep else ""
+                by_pair.append({
+                    "source_label": src_label,
+                    "dest_label": dst_label,
+                    "src_ip": src_ip,
+                    "src_mac": src_mac or None,
+                    "dest_ip": dest_ip,
+                    "count": cnt,
+                })
             app_label = app if app != "-" else "—"
             dest_ips = row.get("dest_ips") or set()
             service_app_nodes.append({
@@ -952,7 +1128,11 @@ def _get_graph_from_events(
             src_ep = endpoints.get(src_id)
             if not src_ep:
                 continue
-            source_id = "router-left" if (src_ep.id in left_hidden_ep_ids) else left_seen.get(src_ep.id, f"left-{src_ep.id}")
+            if ha_mode:
+                ck = canonical_by_src_id.get(src_id)
+                source_id = "router-left" if (ck and ck in left_hidden_canonical_keys) else (ck or left_seen.get(src_id, f"left-{src_ep.id}"))
+            else:
+                source_id = "router-left" if (src_ep.id in left_hidden_ep_ids) else left_seen.get(src_ep.id, f"left-{src_ep.id}")
             if source_id not in left_to_fw:
                 left_to_fw[source_id] = {"count_open": 0, "count_close": 0, "bytes_src_to_dst": 0, "bytes_dst_to_src": 0, "top_ports": {}, "top_rules": {}, "top_apps": {}, "last_seen": None}
             into = left_to_fw[source_id]
@@ -995,20 +1175,48 @@ def _get_graph_from_events(
             }
             edges_svc.append({"source_node_id": port_id, "target_node_id": app_id, **p})
         left_hidden_edges_svc: List[Dict[str, Any]] = []
-        for (src_id, dst_id), row in agg.items():
-            src_ep = endpoints.get(src_id)
-            if not src_ep or src_ep.id not in left_hidden_ep_ids:
-                continue
-            edge_row = {
-                "source_node_id": f"left-{src_ep.id}",
-                "target_node_id": "fw",
-                "count_open": row["count_open"], "count_close": row.get("count_close", 0),
-                "bytes_src_to_dst": row.get("bytes_src_to_dst", 0), "bytes_dst_to_src": row.get("bytes_dst_to_src", 0),
-                "top_ports": row.get("top_ports", {}), "top_rules": row.get("top_rules", {}), "top_apps": row.get("top_apps", {}),
-                "last_seen": _iso(row.get("last_seen")),
-            }
-            edges_svc.append(edge_row)
-            left_hidden_edges_svc.append(edge_row)
+        if ha_mode:
+            hidden_to_fw: Dict[str, Dict[str, Any]] = {}
+            for (src_id, dst_id), row in agg.items():
+                ck = canonical_by_src_id.get(src_id)
+                if not ck or ck not in left_hidden_canonical_keys:
+                    continue
+                if ck not in hidden_to_fw:
+                    hidden_to_fw[ck] = {"count_open": 0, "count_close": 0, "bytes_src_to_dst": 0, "bytes_dst_to_src": 0, "top_ports": {}, "top_rules": {}, "top_apps": {}, "last_seen": None}
+                into = hidden_to_fw[ck]
+                into["count_open"] += row["count_open"]
+                into["count_close"] += row.get("count_close", 0)
+                into["bytes_src_to_dst"] += row.get("bytes_src_to_dst", 0)
+                into["bytes_dst_to_src"] += row.get("bytes_dst_to_src", 0)
+                for k, v in (row.get("top_ports") or {}).items():
+                    into["top_ports"][k] = into["top_ports"].get(k, 0) + v
+                for k, v in (row.get("top_rules") or {}).items():
+                    into["top_rules"][k] = into["top_rules"].get(k, 0) + v
+                for k, v in (row.get("top_apps") or {}).items():
+                    into["top_apps"][k] = into["top_apps"].get(k, 0) + v
+                if row.get("last_seen") and (into.get("last_seen") is None or row["last_seen"] > into["last_seen"]):
+                    into["last_seen"] = row["last_seen"]
+            for ck, payload in hidden_to_fw.items():
+                p = dict(payload)
+                p["last_seen"] = _iso(p.get("last_seen"))
+                edge_row = {"source_node_id": ck, "target_node_id": "fw", **p}
+                edges_svc.append(edge_row)
+                left_hidden_edges_svc.append(edge_row)
+        else:
+            for (src_id, dst_id), row in agg.items():
+                src_ep = endpoints.get(src_id)
+                if not src_ep or src_ep.id not in left_hidden_ep_ids:
+                    continue
+                edge_row = {
+                    "source_node_id": f"left-{src_ep.id}",
+                    "target_node_id": "fw",
+                    "count_open": row["count_open"], "count_close": row.get("count_close", 0),
+                    "bytes_src_to_dst": row.get("bytes_src_to_dst", 0), "bytes_dst_to_src": row.get("bytes_dst_to_src", 0),
+                    "top_ports": row.get("top_ports", {}), "top_rules": row.get("top_rules", {}), "top_apps": row.get("top_apps", {}),
+                    "last_seen": _iso(row.get("last_seen")),
+                }
+                edges_svc.append(edge_row)
+                left_hidden_edges_svc.append(edge_row)
         right_count = len(service_port_nodes) + len(service_app_nodes)
         return {
             "meta": {
@@ -1139,8 +1347,11 @@ def _get_graph_from_events(
         src_ep = endpoints.get(src_id)
         if not src_ep:
             continue
-        # Use router-left for endpoints behind router MAC or without src_mac
-        source_id = "router-left" if (src_ep.id in left_hidden_ep_ids) else left_seen.get(src_ep.id, f"left-{src_ep.id}")
+        if ha_mode:
+            ck = canonical_by_src_id.get(src_id)
+            source_id = "router-left" if (ck and ck in left_hidden_canonical_keys) else (ck or left_seen.get(src_id, f"left-{src_ep.id}"))
+        else:
+            source_id = "router-left" if (src_ep.id in left_hidden_ep_ids) else left_seen.get(src_ep.id, f"left-{src_ep.id}")
         if source_id not in left_to_fw:
             left_to_fw[source_id] = {"count_open": 0, "count_close": 0, "bytes_src_to_dst": 0, "bytes_dst_to_src": 0, "top_ports": {}, "top_rules": {}, "top_apps": {}, "last_seen": None}
         merge_row(left_to_fw[source_id], row)
@@ -1190,20 +1401,54 @@ def _get_graph_from_events(
             edges.append({"source_node_id": ig_id, "target_node_id": router_node_id, **p})
 
     # Left hidden edges (for router-left bucket: no src_mac OR flagged router MAC)
-    for (src_id, dst_id), row in agg.items():
-        src_ep = endpoints.get(src_id)
-        if not src_ep or src_ep.id not in left_hidden_ep_ids:
-            continue
-        ls = row.get("last_seen")
-        left_hidden_edges.append({
-            "source_node_id": f"left-{src_ep.id}",
-            "target_node_id": "fw",
-            "count_open": row["count_open"], "count_close": row["count_close"],
-            "bytes_src_to_dst": row["bytes_src_to_dst"], "bytes_dst_to_src": row["bytes_dst_to_src"],
-            "top_ports": row["top_ports"], "top_rules": row["top_rules"], "top_apps": row["top_apps"],
-            "last_seen": _iso(ls),
-            "top_services": services_by_ep.get(dst_id, [])[:3],
-        })
+    if ha_mode:
+        left_hidden_agg: Dict[str, Dict[str, Any]] = {}
+        for (src_id, dst_id), row in agg.items():
+            ck = canonical_by_src_id.get(src_id)
+            if not ck or ck not in left_hidden_canonical_keys:
+                continue
+            if ck not in left_hidden_agg:
+                left_hidden_agg[ck] = {"count_open": 0, "count_close": 0, "bytes_src_to_dst": 0, "bytes_dst_to_src": 0, "top_ports": {}, "top_rules": {}, "top_apps": {}, "last_seen": None, "top_services": []}
+            into = left_hidden_agg[ck]
+            into["count_open"] += row["count_open"]
+            into["count_close"] += row.get("count_close", 0)
+            into["bytes_src_to_dst"] += row.get("bytes_src_to_dst", 0)
+            into["bytes_dst_to_src"] += row.get("bytes_dst_to_src", 0)
+            for k, v in (row.get("top_ports") or {}).items():
+                into["top_ports"][k] = into["top_ports"].get(k, 0) + v
+            for k, v in (row.get("top_rules") or {}).items():
+                into["top_rules"][k] = into["top_rules"].get(k, 0) + v
+            for k, v in (row.get("top_apps") or {}).items():
+                into["top_apps"][k] = into["top_apps"].get(k, 0) + v
+            if row.get("last_seen") and (into.get("last_seen") is None or row["last_seen"] > into["last_seen"]):
+                into["last_seen"] = row["last_seen"]
+            into["top_services"] = (into.get("top_services") or []) + services_by_ep.get(dst_id, [])[:3]
+        for ck, payload in left_hidden_agg.items():
+            top_svc = payload.get("top_services") or []
+            left_hidden_edges.append({
+                "source_node_id": ck,
+                "target_node_id": "fw",
+                "count_open": payload["count_open"], "count_close": payload["count_close"],
+                "bytes_src_to_dst": payload["bytes_src_to_dst"], "bytes_dst_to_src": payload["bytes_dst_to_src"],
+                "top_ports": payload.get("top_ports", {}), "top_rules": payload.get("top_rules", {}), "top_apps": payload.get("top_apps", {}),
+                "last_seen": _iso(payload.get("last_seen")),
+                "top_services": top_svc[:3],
+            })
+    else:
+        for (src_id, dst_id), row in agg.items():
+            src_ep = endpoints.get(src_id)
+            if not src_ep or src_ep.id not in left_hidden_ep_ids:
+                continue
+            ls = row.get("last_seen")
+            left_hidden_edges.append({
+                "source_node_id": f"left-{src_ep.id}",
+                "target_node_id": "fw",
+                "count_open": row["count_open"], "count_close": row["count_close"],
+                "bytes_src_to_dst": row["bytes_src_to_dst"], "bytes_dst_to_src": row["bytes_dst_to_src"],
+                "top_ports": row["top_ports"], "top_rules": row["top_rules"], "top_apps": row["top_apps"],
+                "last_seen": _iso(ls),
+                "top_services": services_by_ep.get(dst_id, [])[:3],
+            })
 
     return {
         "meta": {
