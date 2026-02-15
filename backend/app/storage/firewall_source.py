@@ -41,7 +41,9 @@ def upsert_firewall_syslog(db: Session, device_key: str, ts_utc: datetime) -> No
             updated_at=now,
         ))
     else:
-        row.source_syslog = 1
+        # Import wins: do not overwrite import with syslog (so retention never purges imported firewalls)
+        if row.source_import != 1:
+            row.source_syslog = 1
         first = _ensure_utc(row.first_seen_ts)
         last = _ensure_utc(row.last_seen_ts)
         if first is None or ts_utc < first:
@@ -95,9 +97,20 @@ def upsert_firewall_import(
 
 
 def get_syslog_device_keys(db: Session) -> list[str]:
-    """Return list of device_keys where source_syslog=1 (for retention: only these are purged)."""
+    """Return list of device_keys where source_syslog=1 (any syslog source)."""
     rows = db.execute(
         select(FirewallInventory.device_key).where(FirewallInventory.source_syslog == 1)
+    ).scalars().all()
+    return list(rows)
+
+
+def get_syslog_only_device_keys_for_retention(db: Session) -> list[str]:
+    """Return device_keys where source_syslog=1 AND source_import=0. Only these are purged by retention; imported firewalls are excluded."""
+    rows = db.execute(
+        select(FirewallInventory.device_key).where(
+            FirewallInventory.source_syslog == 1,
+            FirewallInventory.source_import == 0,
+        )
     ).scalars().all()
     return list(rows)
 

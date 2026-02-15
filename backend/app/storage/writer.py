@@ -114,6 +114,7 @@ class Writer:
                 index_elements=["device_key"],
                 set_={
                     "source_import": 1,
+                    "source_syslog": 0,  # import wins: do not treat as syslog for retention
                     "last_import_ts": now,
                     "updated_at": now,
                 },
@@ -124,6 +125,7 @@ class Writer:
                 index_elements=["device_key"],
                 set_={
                     "source_import": 1,
+                    "source_syslog": 0,  # import wins: do not treat as syslog for retention
                     "last_import_ts": now,
                     "updated_at": now,
                 },

@@ -168,6 +168,13 @@ def list_firewalls(request: Request):
             source_syslog = bool(inv and inv.source_syslog)
             source_import = bool(inv and inv.source_import)
             last_import_ts = _iso(inv.last_import_ts) if inv and inv.last_import_ts else None
+            # Pills for UI: import wins — if ever imported, show only IMPORT (never SYSLOG)
+            if source_import:
+                source_display = ["IMPORT"]
+            elif source_syslog:
+                source_display = ["SYSLOG"]
+            else:
+                source_display = ["—"]
 
             active_jobs_for_device = device_to_jobs.get(device_key, [])
             result.append({
@@ -181,6 +188,7 @@ def list_firewalls(request: Request):
                     "syslog": source_syslog,
                     "import": source_import,
                     "last_import_ts": last_import_ts,
+                    "source_display": source_display,
                 },
                 "is_importing": len(active_jobs_for_device) > 0,
                 "active_import_jobs": active_jobs_for_device,

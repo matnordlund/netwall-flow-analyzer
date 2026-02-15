@@ -139,7 +139,7 @@ def update_local_networks(request: Request, payload: LocalNetworksPayload) -> Di
 
 def run_cleanup(session_factory, engine) -> Dict[str, Any]:
     """Execute one cleanup pass. Only deletes data for firewalls with source_syslog=1 (retention excluded for import-only)."""
-    from ..storage.firewall_source import expand_device_keys_to_member_devices, get_syslog_device_keys
+    from ..storage.firewall_source import expand_device_keys_to_member_devices, get_syslog_only_device_keys_for_retention
 
     t0 = time.monotonic()
     db: Session = session_factory()
@@ -151,10 +151,11 @@ def run_cleanup(session_factory, engine) -> Dict[str, Any]:
         keep_days = int(retention.get("keep_days", 3))
         cutoff = datetime.now(timezone.utc) - timedelta(days=keep_days)
 
-        syslog_keys = get_syslog_device_keys(db)
-        allowed_devices = expand_device_keys_to_member_devices(db, syslog_keys)
+        # Only purge data for firewalls that are syslog-only (never imported); imported firewalls are retention-exempt
+        syslog_only_keys = get_syslog_only_device_keys_for_retention(db)
+        allowed_devices = expand_device_keys_to_member_devices(db, syslog_only_keys)
         if not allowed_devices:
-            return {"skipped": True, "reason": "no syslog firewalls", "cutoff": cutoff.isoformat()}
+            return {"skipped": True, "reason": "no syslog-only firewalls (imported firewalls are excluded)", "cutoff": cutoff.isoformat()}
 
         deleted_events = 0
         deleted_raw_logs = 0

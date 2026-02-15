@@ -3447,7 +3447,7 @@ function FirewallSourceBadges({
   onOpenImportStatus,
   onOpenFirewallDetails,
 }: {
-  source?: { syslog: boolean; import: boolean; last_import_ts?: string | null };
+  source?: { syslog: boolean; import: boolean; last_import_ts?: string | null; source_display?: string[] };
   isImporting?: boolean;
   activeImportJobs?: ActiveImportJob[];
   onOpenImportStatus?: (jobId: string) => void;
@@ -3455,6 +3455,7 @@ function FirewallSourceBadges({
 }) {
   const firstJobId = activeImportJobs?.[0]?.job_id;
   const progressPct = activeImportJobs?.[0]?.progress != null ? Math.round(activeImportJobs[0].progress * 100) : null;
+  const display = source?.source_display && source.source_display.length > 0 ? source.source_display : null;
   return (
     <span className="flex flex-wrap items-center gap-1.5">
       {isImporting && (firstJobId || onOpenFirewallDetails) && (
@@ -3474,25 +3475,44 @@ function FirewallSourceBadges({
       )}
       {source && (
         <>
-          {source.syslog && (
-            <span className="inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium bg-primary/15 text-primary border border-primary/30">
-              SYSLOG
-            </span>
-          )}
-          {source.import && (
-            <span
-              className={cn(
-                'inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium border',
-                source.import && !source.syslog
-                  ? 'bg-violet-500/15 text-violet-700 dark:text-violet-300 border-violet-500/40'
-                  : 'bg-muted text-muted-foreground border-border',
+          {display ? (
+            display.map((label) =>
+              label === 'IMPORT' ? (
+                <span
+                  key={label}
+                  className="inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium bg-violet-500/15 text-violet-700 dark:text-violet-300 border border-violet-500/40"
+                >
+                  IMPORT
+                </span>
+              ) : label === 'SYSLOG' ? (
+                <span
+                  key={label}
+                  className="inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium bg-primary/15 text-primary border border-primary/30"
+                >
+                  SYSLOG
+                </span>
+              ) : (
+                <span key={label} className="text-muted-foreground text-xs">
+                  {label}
+                </span>
+              )
+            )
+          ) : (
+            <>
+              {source.syslog && (
+                <span className="inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium bg-primary/15 text-primary border border-primary/30">
+                  SYSLOG
+                </span>
               )}
-            >
-              IMPORTED
-            </span>
+              {source.import && (
+                <span className="inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium bg-violet-500/15 text-violet-700 dark:text-violet-300 border border-violet-500/40">
+                  IMPORT
+                </span>
+              )}
+            </>
           )}
-          {!source.syslog && !source.import && !isImporting && <span className="text-muted-foreground text-xs">—</span>}
-          {source.import && !source.syslog && (
+          {!display && !source.syslog && !source.import && !isImporting && <span className="text-muted-foreground text-xs">—</span>}
+          {(display?.includes('IMPORT') || (source.import && !source.syslog)) && (
             <span className="text-[10px] text-muted-foreground italic" title="Not removed by log retention">
               Retention excluded
             </span>
@@ -3512,7 +3532,7 @@ type FirewallRow = {
   oldest_log: string | null;
   latest_log: string | null;
   event_count: number;
-  source?: { syslog: boolean; import: boolean; last_import_ts?: string | null };
+  source?: { syslog: boolean; import: boolean; last_import_ts?: string | null; source_display?: string[] };
   is_importing?: boolean;
   active_import_jobs?: Array<{ job_id: string; filename?: string; progress?: number; status?: string }>;
 };
