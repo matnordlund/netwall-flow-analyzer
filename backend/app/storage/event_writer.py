@@ -31,12 +31,16 @@ class EventWriter(Protocol):
 
 
 class SQLiteEventWriter:
-    """SQLite implementation: PRAGMAs for WAL/speed, bulk_insert_mappings for raw_logs and events."""
+    """SQLite implementation: PRAGMAs for WAL/speed (SQLite only), bulk_insert_mappings for raw_logs and events."""
 
     def configure_ingest_mode(self, session: Session) -> None:
-        """Set SQLite PRAGMAs on the connection used by this session for faster ingest."""
+        """Set connection-level settings for fast ingest. SQLite only: WAL and related PRAGMAs; no-op for Postgres."""
+        dialect = session.get_bind().dialect.name
+        if dialect != "sqlite":
+            return
         session.execute(text("PRAGMA journal_mode=WAL"))
         session.execute(text("PRAGMA synchronous=NORMAL"))
+        session.execute(text("PRAGMA busy_timeout=10000"))
         session.execute(text("PRAGMA temp_store=MEMORY"))
         session.execute(text("PRAGMA cache_size=-200000"))  # ~200 MB
         session.execute(text("PRAGMA wal_autocheckpoint=2000"))
