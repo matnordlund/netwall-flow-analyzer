@@ -4,10 +4,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy import func
 
 from ..config import AppConfig
 from ..storage.models import Endpoint, Event, Flow
@@ -84,7 +84,6 @@ def _update_flow_row(
         return
 
     event_ts = _ensure_utc(event.ts_utc)
-    ins = sqlite_insert(Flow)
     values = {
         "device": device,
         "basis": basis,
@@ -105,14 +104,23 @@ def _update_flow_row(
         "top_rules": {},
         "top_apps": {},
     }
-    stmt = ins.values(**values).on_conflict_do_update(
-        index_elements=_FLOW_IDENTITY,
-        set_={
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        ins = pg_insert(Flow).values(**values)
+        update_set = {
+            Flow.count_open: Flow.count_open + 1,
+            Flow.first_seen: func.least(Flow.first_seen, ins.excluded.first_seen),
+            Flow.last_seen: func.greatest(Flow.last_seen, ins.excluded.last_seen),
+        }
+        stmt = ins.on_conflict_do_update(constraint="ux_flows_identity", set_=update_set)
+    else:
+        ins = sqlite_insert(Flow).values(**values)
+        update_set = {
             Flow.count_open: Flow.count_open + 1,
             Flow.first_seen: func.min(Flow.first_seen, ins.excluded.first_seen),
             Flow.last_seen: func.max(Flow.last_seen, ins.excluded.last_seen),
-        },
-    )
+        }
+        stmt = ins.on_conflict_do_update(index_elements=_FLOW_IDENTITY, set_=update_set)
     db.execute(stmt)
     db.flush()
 
