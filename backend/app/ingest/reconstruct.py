@@ -817,11 +817,26 @@ class SyslogIngestor:
             ingest_stats.batch_errors += 1
             ingest_stats.touch()
             logger.exception("Failed to persist batch: %s", exc)
+            try:
+                self.upload_session.rollback()
+            except Exception:  # noqa: S110
+                pass
+            try:
+                self.upload_session.close()
+            except Exception:  # noqa: S110
+                pass
+            self.upload_session = self.sessionmaker()
+            if self.upload_writer is not None:
+                self.upload_writer.configure_ingest_mode(self.upload_session)
             raise
 
     async def _process_records(self, records: Iterable[str]) -> None:
-        batch_mode = self.upload_writer is not None and self.upload_session is not None
-        db: Session = self.upload_session if batch_mode else self.sessionmaker()
+        # Batch mode: Writer path (upload_batch_writer) or legacy session+EventWriter path
+        batch_mode = (
+            self.upload_batch_writer is not None
+            or (self.upload_writer is not None and self.upload_session is not None)
+        )
+        db: Session = self.upload_session if (self.upload_session is not None) else self.sessionmaker()
         try:
             for raw_text in records:
                 ingest_stats.records_processed += 1
@@ -912,18 +927,22 @@ class SyslogIngestor:
             if not batch_mode:
                 db.commit()
                 ingest_stats.touch()
+            elif self.upload_session is None:
+                # Writer path: db is a temporary session used for device id / classification only
+                db.commit()
+                ingest_stats.touch()
         except Exception as exc:  # noqa: BLE001
             ingest_stats.batch_errors += 1
             ingest_stats.touch()
             logger.exception("Failed to persist records: %s", exc)
-            if not batch_mode:
+            if not batch_mode or self.upload_session is None:
                 try:
                     db.rollback()
                 except Exception:  # noqa: S110
                     pass
             raise
         finally:
-            if not batch_mode:
+            if not batch_mode or self.upload_session is None:
                 try:
                     db.close()
                 except Exception:  # noqa: S110

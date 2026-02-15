@@ -83,15 +83,18 @@ class Writer:
         session = session_factory()
         try:
             self._configure_sqlite_connection(session)
-            with session.begin():
-                if batch.raw_logs:
-                    session.bulk_insert_mappings(RawLog, batch.raw_logs)
-                if batch.events:
-                    session.bulk_insert_mappings(Event, batch.events)
-                for fk in batch.firewall_keys:
-                    self._upsert_firewall_inventory(session, fk)
-                ep_key_to_id = self._upsert_endpoints_from_events(session, batch.events)
-                self._upsert_flows_from_events(session, batch.events, ep_key_to_id)
+            if batch.raw_logs:
+                session.bulk_insert_mappings(RawLog, batch.raw_logs)
+            if batch.events:
+                session.bulk_insert_mappings(Event, batch.events)
+            for fk in batch.firewall_keys:
+                self._upsert_firewall_inventory(session, fk)
+            ep_key_to_id = self._upsert_endpoints_from_events(session, batch.events)
+            self._upsert_flows_from_events(session, batch.events, ep_key_to_id)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
         finally:
             session.close()
 

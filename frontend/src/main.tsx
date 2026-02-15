@@ -3475,7 +3475,11 @@ function FirewallSourceBadges({
       )}
       {source && (
         <>
-          {display ? (
+          {isImporting ? (
+            <span className="inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium bg-violet-500/15 text-violet-700 dark:text-violet-300 border border-violet-500/40">
+              Importing
+            </span>
+          ) : display ? (
             display.map((label) =>
               label === 'IMPORT' ? (
                 <span
@@ -3512,7 +3516,7 @@ function FirewallSourceBadges({
             </>
           )}
           {!display && !source.syslog && !source.import && !isImporting && <span className="text-muted-foreground text-xs">—</span>}
-          {(display?.includes('IMPORT') || (source.import && !source.syslog)) && (
+          {(isImporting || display?.includes('IMPORT') || (source.import && !source.syslog)) && (
             <span className="text-[10px] text-muted-foreground italic" title="Not removed by log retention">
               Retention excluded
             </span>

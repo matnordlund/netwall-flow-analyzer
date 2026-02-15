@@ -11,6 +11,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ..config import AppConfig
 from ..storage.models import Endpoint, Event, Flow
+from ..storage.upsert import upsert_endpoint_safe
 
 logger = logging.getLogger("netwall.flows")
 
@@ -31,30 +32,20 @@ def _get_or_create_endpoint(
     mac: Optional[str],
     device_name: Optional[str],
 ) -> Optional[Endpoint]:
+    """Upsert endpoint (Core ON CONFLICT DO NOTHING) then SELECT; no flush. Idempotent for concurrent/HA."""
     if not ip:
         return None
 
     mac_norm = mac or None
-    # Check pending (new) objects in this session to avoid duplicate add in same batch
-    for obj in db.new:
-        if isinstance(obj, Endpoint) and obj.device == device and obj.ip == ip and (mac_norm == obj.mac or (mac_norm is None and obj.mac is None)):
-            if device_name and not obj.device_name:
-                obj.device_name = device_name
-            return obj
+    upsert_endpoint_safe(db, device=device, ip=ip, mac=mac_norm, device_name=device_name)
     stmt = select(Endpoint).where(
         Endpoint.device == device,
         Endpoint.ip == ip,
         Endpoint.mac.is_(mac_norm) if mac_norm is None else Endpoint.mac == mac_norm,
-    )
-    ep = db.execute(stmt).scalar_one_or_none()
-    if ep is None:
-        ep = Endpoint(device=device, ip=ip, mac=mac_norm, device_name=device_name)
-        db.add(ep)
-        # Do not flush here; let the outer transaction flush/commit once per batch.
-    else:
-        # Backfill device_name if we learn it later.
-        if device_name and not ep.device_name:
-            ep.device_name = device_name
+    ).limit(1)
+    ep = db.execute(stmt).scalars().first()
+    if ep and device_name and not ep.device_name:
+        ep.device_name = device_name
     return ep
 
 
@@ -157,17 +148,20 @@ def _ensure_endpoints_for_event(
     db: Session,
     event: Event,
 ) -> tuple:
-    """Get or create (add only, no flush) the four endpoints for an event. Returns (src_orig, dst_orig, src_nat, dst_nat)."""
+    """Get or create (upsert + select, no flush) the four endpoints for an event. Returns (src_orig, dst_orig, src_nat, dst_nat).
+    Uses event.firewall_key when available for HA (one device key per cluster).
+    """
+    device = event.firewall_key if getattr(event, "firewall_key", None) else event.device
     src_orig = _get_or_create_endpoint(
         db,
-        device=event.device,
+        device=device,
         ip=event.src_ip,
         mac=event.src_mac,
         device_name=event.src_device,
     )
     dst_orig = _get_or_create_endpoint(
         db,
-        device=event.device,
+        device=device,
         ip=event.dest_ip,
         mac=event.dest_mac,
         device_name=event.dest_device,
@@ -176,14 +170,14 @@ def _ensure_endpoints_for_event(
     dst_ip_nat = event.xlat_dest_ip or event.dest_ip
     src_nat = _get_or_create_endpoint(
         db,
-        device=event.device,
+        device=device,
         ip=src_ip_nat,
         mac=event.src_mac,
         device_name=event.src_device,
     )
     dst_nat = _get_or_create_endpoint(
         db,
-        device=event.device,
+        device=device,
         ip=dst_ip_nat,
         mac=event.dest_mac,
         device_name=event.dest_device,
@@ -199,7 +193,8 @@ def _add_flow_rows_for_event(
     src_nat: Optional[Endpoint],
     dst_nat: Optional[Endpoint],
 ) -> None:
-    """Write flow rows for one event. Endpoints must already be flushed so .id is set."""
+    """Write flow rows for one event. Endpoints must have .id (from upsert+select, no flush)."""
+    flow_device = event.firewall_key if getattr(event, "firewall_key", None) else event.device
     bases = [
         ("side", event.recv_side, event.dest_side),
         ("zone", event.recv_zone, event.dest_zone),
@@ -216,7 +211,7 @@ def _add_flow_rows_for_event(
         for basis, from_val, to_val in bases:
             _update_flow_row(
                 db,
-                device=event.device,
+                device=flow_device,
                 basis=basis,
                 from_value=from_val,
                 to_value=to_val,
@@ -234,7 +229,7 @@ def update_flows_for_events_batch(
     events: list[Event],
     config: AppConfig,
 ) -> None:
-    """Update aggregated flows for a batch of events. One flush after all endpoints, then flow rows. Safe for use from ingest batch."""
+    """Update aggregated flows for a batch of events. No flush; endpoints from upsert+select. Safe for use from ingest batch."""
     if not events:
         return
     # 1) Get or create all endpoints (add only, no flush)
@@ -244,8 +239,7 @@ def update_flows_for_events_batch(
             endpoint_tuples.append(None)
             continue
         endpoint_tuples.append(_ensure_endpoints_for_event(db, event))
-    # 2) Single flush so new endpoints get IDs
-    db.flush()
+    # 2) No flush; endpoints already have IDs from upsert+select in _get_or_create_endpoint
     # 3) Add flow rows (no flush)
     for event, eps in zip(events, endpoint_tuples):
         if event.event_type not in {"conn_open", "conn_open_natsat"}:
@@ -257,10 +251,9 @@ def update_flows_for_events_batch(
 
 
 def update_flows_for_event(db: Session, event: Event, config: AppConfig) -> None:
-    """Update aggregated flows for a single event. Uses one flush after endpoints so IDs are assigned."""
+    """Update aggregated flows for a single event. No flush; endpoints from upsert+select."""
     if event.event_type not in {"conn_open", "conn_open_natsat"}:
         return
     src_orig, dst_orig, src_nat, dst_nat = _ensure_endpoints_for_event(db, event)
-    db.flush()
     _add_flow_rows_for_event(db, event, src_orig, dst_orig, src_nat, dst_nat)
 
