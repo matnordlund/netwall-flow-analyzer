@@ -45,7 +45,7 @@ def _mark_stalled_running_jobs(session_factory) -> int:
         db.close()
 
 
-def run_worker_loop(session_factory, config, syslog_ingestor, stop_event) -> None:
+def run_worker_loop(session_factory, config, syslog_ingestor, stop_event, engine) -> None:
     """Run forever: pick oldest queued job, set running, process; repeat. Stop when stop_event is set."""
     while not stop_event.is_set():
         # Mark any job stuck in 'running' (e.g. crashed worker) as error
@@ -94,6 +94,7 @@ def run_worker_loop(session_factory, config, syslog_ingestor, stop_event) -> Non
                 session_factory=session_factory,
                 config=config,
                 ingestor=syslog_ingestor,
+                engine=engine,
             )
         except Exception as e:
             logger.exception("Worker run_import_job %s failed: %s", job_id, e)

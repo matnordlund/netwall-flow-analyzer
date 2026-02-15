@@ -75,6 +75,23 @@ def ensure_ingest_job_finished_at(engine) -> None:
             logger.warning("Could not add ingest_jobs.finished_at: %s", e)
 
 
+def ensure_event_ha_columns(engine) -> None:
+    """Add device_member, firewall_key to events if missing (SQLite only). Idempotent."""
+    if engine.dialect.name != "sqlite":
+        return
+    for col, typ in [("device_member", "VARCHAR(255)"), ("firewall_key", "VARCHAR(255)")]:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(f"ALTER TABLE events ADD COLUMN {col} {typ}"))
+                conn.commit()
+            logger.info("Added events.%s", col)
+        except Exception as e:  # noqa: BLE001
+            if "duplicate column name" in str(e).lower():
+                pass
+            else:
+                logger.warning("Could not add events.%s: %s", col, e)
+
+
 def ensure_ingest_job_phase(engine) -> None:
     """Add phase column to ingest_jobs if missing (SQLite only). Idempotent."""
     if engine.dialect.name != "sqlite":

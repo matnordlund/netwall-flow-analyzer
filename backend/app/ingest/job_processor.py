@@ -15,7 +15,7 @@ from ..api.device_resolve import get_device_display_label
 from ..config import AppConfig
 from ..storage.models import IngestJob
 from ..storage.firewall_source import get_canonical_device_key, upsert_firewall_import
-from ..storage.event_writer import SQLiteEventWriter
+from ..storage.writer import Writer as StorageWriter
 from .reconstruct import SyslogIngestor, UploadCollector
 
 logger = logging.getLogger("netwall.ingest.job")
@@ -27,6 +27,7 @@ def run_import_job(
     session_factory: Any,
     config: AppConfig,
     ingestor: SyslogIngestor,
+    engine: Any,
 ) -> None:
     """Sync entry point for background thread: run process_ingest_job in a new event loop."""
     loop = asyncio.new_event_loop()
@@ -39,6 +40,7 @@ def run_import_job(
                 session_factory=session_factory,
                 ingestor=ingestor,
                 config=config,
+                engine=engine,
             )
         )
     except Exception as e:  # noqa: BLE001
@@ -175,6 +177,7 @@ async def process_ingest_job(
     session_factory: sessionmaker,
     ingestor: SyslogIngestor,
     config: AppConfig,
+    engine: Any,
 ) -> None:
     """Read file at file_path, run through ingestor, update IngestJob row periodically and on completion."""
     collector = UploadCollector()
@@ -201,21 +204,17 @@ async def process_ingest_job(
 
         ingestor.upload_collector = collector
 
-        # Dedicated session + writer for batched ingest (WAL PRAGMAs, bulk inserts).
-        # Job row is updated only on this session when we commit each batch to avoid SQLite "database is locked".
-        ingest_session = session_factory()
-        writer = SQLiteEventWriter()
-        try:
-            writer.configure_ingest_mode(ingest_session)
-            ingestor.upload_session = ingest_session
-            ingestor.upload_writer = writer
-            ingestor.upload_raw_batch = []
-            ingestor.upload_event_batch = []
-            ingestor.upload_flow_events = []
-            ingestor.upload_batch_size = 5000
-            ingestor.upload_job_id = job_id
-            ingestor.upload_get_lines_processed = lambda: lines_processed
+        # Batched ingest via storage Writer (Core upserts; one transaction per batch; SQLite writer lock).
+        batch_writer = StorageWriter(engine)
+        ingestor.upload_batch_writer = batch_writer
+        ingestor.upload_raw_batch = []
+        ingestor.upload_event_batch = []
+        ingestor.upload_flow_events = []
+        ingestor.upload_batch_size = 5000
+        ingestor.upload_job_id = job_id
+        ingestor.upload_get_lines_processed = lambda: lines_processed
 
+        try:
             # Stream file from disk line-by-line (64 KB read chunks; no full-file read)
             CHECK_CANCEL_EVERY = 5000
             if check_job_cancel_requested(session_factory, job_id):
@@ -264,21 +263,12 @@ async def process_ingest_job(
             finally:
                 db_fin.close()
         finally:
-            ingestor.upload_session = None
-            ingestor.upload_writer = None
+            ingestor.upload_batch_writer = None
             ingestor.upload_raw_batch = None
             ingestor.upload_event_batch = None
             ingestor.upload_flow_events = None
             ingestor.upload_job_id = None
             ingestor.upload_get_lines_processed = None
-            try:
-                ingest_session.rollback()
-            except Exception:  # noqa: S110
-                pass
-            try:
-                ingest_session.close()
-            except Exception:  # noqa: S110
-                pass
 
         # Final job update and status=done on a new session (ingest session is closed, no lock)
         now = datetime.now(timezone.utc)

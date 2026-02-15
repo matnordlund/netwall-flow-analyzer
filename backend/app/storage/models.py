@@ -37,7 +37,9 @@ class Event(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     ts_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    device: Mapped[str] = mapped_column(String(255), index=True)
+    device: Mapped[str] = mapped_column(String(255), index=True)  # kept for backward compat; prefer firewall_key for HA
+    device_member: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)  # raw hostname / member
+    firewall_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)  # canonical (ha:base or device)
     event_type: Mapped[Optional[str]] = mapped_column(String(64), index=True)
     action: Mapped[Optional[str]] = mapped_column(String(64), index=True)
 

@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from ..config import AppConfig
 from ..storage.models import DeviceIdentification, Endpoint, Event, IngestJob, RawLog
 from ..storage.event_writer import EventWriter
+from ..storage.writer import ParsedBatch, Writer as StorageWriter
+from ..storage.ha_canonical import canonical_firewall_key
 from ..storage.firewall_source import get_canonical_device_key, upsert_firewall_syslog
 from ..enrichment.classification import apply_direction_classification
 from ..aggregation.flows import update_flows_for_events_batch, update_flows_for_event
@@ -718,9 +720,10 @@ class SyslogIngestor:
     # Batch mode (set by job processor): use one session and writer, flush every N rows
     upload_session: Optional[Session] = field(default=None, repr=False)
     upload_writer: Optional[EventWriter] = field(default=None, repr=False)
+    upload_batch_writer: Optional[StorageWriter] = field(default=None, repr=False)  # storage Writer for batch persist (Core upserts)
     upload_raw_batch: Optional[List[dict]] = field(default=None, repr=False)
     upload_event_batch: Optional[List[dict]] = field(default=None, repr=False)
-    upload_flow_events: Optional[List] = field(default=None, repr=False)  # Event ORM models for batch flow update
+    upload_flow_events: Optional[List] = field(default=None, repr=False)  # Event ORM models for batch flow update (legacy path only)
     upload_batch_size: int = 5000
     upload_job_id: Optional[str] = field(default=None, repr=False)
     upload_get_lines_processed: Optional[Any] = field(default=None, repr=False)  # callable returning int (lines_processed)
@@ -735,25 +738,61 @@ class SyslogIngestor:
         records = self.reconstructor.flush()
         if records:
             await self._process_records(records)
-        if self.upload_writer is not None and self.upload_raw_batch is not None:
+        if (self.upload_batch_writer is not None or self.upload_writer is not None) and self.upload_raw_batch is not None:
             self._flush_upload_batch()
 
     def _flush_upload_batch(self) -> None:
-        """Flush accumulated raw/event batches to DB via writer; update job row on same session to avoid SQLite lock."""
-        if not self.upload_session or not self.upload_writer:
-            return
+        """Flush accumulated raw/event batches to DB. Uses storage Writer (Core upserts) when set; else legacy session+EventWriter."""
         raw_batch = self.upload_raw_batch or []
         event_batch = self.upload_event_batch or []
         flow_events = self.upload_flow_events or []
         if not raw_batch and not event_batch:
             return
+
+        if self.upload_batch_writer is not None:
+            # New path: single Writer transaction (raw_logs, events, firewalls, endpoints, flows); job update in separate session
+            try:
+                batch = ParsedBatch(raw_logs=raw_batch, events=event_batch)
+                self.upload_batch_writer.write_batch(batch, self.upload_job_id)
+                if self.upload_raw_batch is not None:
+                    self.upload_raw_batch.clear()
+                if self.upload_event_batch is not None:
+                    self.upload_event_batch.clear()
+                if self.upload_flow_events is not None:
+                    self.upload_flow_events.clear()
+                ingest_stats.touch()
+                # Job progress in a separate short transaction (Writer holds its own session/lock)
+                if self.upload_job_id and self.upload_collector is not None and self.upload_get_lines_processed is not None:
+                    db = self.sessionmaker()
+                    try:
+                        j = db.get(IngestJob, self.upload_job_id)
+                        if j:
+                            j.lines_processed = self.upload_get_lines_processed()
+                            j.parse_ok = self.upload_collector.parse_ok
+                            j.parse_err = self.upload_collector.parse_err
+                            j.filtered_id = self.upload_collector.filtered_id
+                            j.raw_logs_inserted = self.upload_collector.raw_logs_inserted
+                            j.events_inserted = self.upload_collector.events_inserted
+                            j.time_min = self.upload_collector.time_min_iso()
+                            j.time_max = self.upload_collector.time_max_iso()
+                            j.updated_at = datetime.now(timezone.utc)
+                        db.commit()
+                    finally:
+                        db.close()
+            except Exception as exc:  # noqa: BLE001
+                ingest_stats.batch_errors += 1
+                ingest_stats.touch()
+                logger.exception("Failed to persist batch: %s", exc)
+                raise
+            return
+
+        if not self.upload_session or not self.upload_writer:
+            return
         try:
             self.upload_writer.insert_raw_logs(self.upload_session, raw_batch)
             self.upload_writer.insert_events(self.upload_session, event_batch)
-            # Flow aggregation: one flush per batch (endpoints then flow rows); no flush inside helpers
             if flow_events:
                 update_flows_for_events_batch(self.upload_session, flow_events, self.config)
-            # Update job row on same session so we don't open a second writer (SQLite: one writer at a time)
             if self.upload_job_id and self.upload_collector is not None and self.upload_get_lines_processed is not None:
                 j = self.upload_session.get(IngestJob, self.upload_job_id)
                 if j:
@@ -778,7 +817,6 @@ class SyslogIngestor:
             ingest_stats.batch_errors += 1
             ingest_stats.touch()
             logger.exception("Failed to persist batch: %s", exc)
-            # Do not rollback here; bubble so caller can rollback once at transaction boundary.
             raise
 
     async def _process_records(self, records: Iterable[str]) -> None:
@@ -852,6 +890,9 @@ class SyslogIngestor:
                     # CONN log → Event model
                     _, event_model = normalize_to_models(parsed, raw_text)
                     if event_model is not None:
+                        # HA: canonical firewall key for inventory/graph; keep raw device as device_member
+                        event_model.device_member = parsed.device
+                        event_model.firewall_key, _ = canonical_firewall_key(parsed.device or "")
                         apply_direction_classification(
                             db=db,
                             event=event_model,
