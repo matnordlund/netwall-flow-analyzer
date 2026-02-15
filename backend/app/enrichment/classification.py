@@ -4,6 +4,7 @@ import logging
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import ClassificationPrecedence
@@ -41,17 +42,47 @@ def _record_unclassified(
 ) -> None:
     if not name:
         return
-    stmt = select(UnclassifiedEndpoint).where(
-        UnclassifiedEndpoint.device == device,
-        UnclassifiedEndpoint.kind == kind,
-        UnclassifiedEndpoint.name == name,
-    )
-    obj = db.execute(stmt).scalar_one_or_none()
-    if obj is None:
-        obj = UnclassifiedEndpoint(device=device, kind=kind, name=name, count=1)
-        db.add(obj)
-    else:
-        obj.count += 1
+
+    # 1) Check pending objects in this session (prevents duplicates in same flush)
+    for obj in list(db.new):
+        if (
+            isinstance(obj, UnclassifiedEndpoint)
+            and obj.device == device
+            and obj.kind == kind
+            and obj.name == name
+        ):
+            obj.count += 1
+            return
+
+    # 2) Check DB
+    existing = db.execute(
+        select(UnclassifiedEndpoint).where(
+            UnclassifiedEndpoint.device == device,
+            UnclassifiedEndpoint.kind == kind,
+            UnclassifiedEndpoint.name == name,
+        )
+    ).scalar_one_or_none()
+    if existing:
+        existing.count += 1
+        return
+
+    # 3) Create
+    ep = UnclassifiedEndpoint(device=device, kind=kind, name=name, count=1)
+    db.add(ep)
+
+    # 4) Flush safely (handles race conditions + Postgres strictness)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        existing = db.execute(
+            select(UnclassifiedEndpoint).where(
+                UnclassifiedEndpoint.device == device,
+                UnclassifiedEndpoint.kind == kind,
+                UnclassifiedEndpoint.name == name,
+            )
+        ).scalar_one()
+        existing.count += 1
 
 
 def derive_side_for_endpoint(
