@@ -7,7 +7,6 @@ normalizes empty MAC to NULL, and merges identical (ip, mac) correctly.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, func, select, union_all
