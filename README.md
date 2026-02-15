@@ -1,6 +1,6 @@
 # NetWall Flow Analyzer
 
-NetWall CONN Flow Analyzer ingests firewall connection logs (UDP syslog or file upload), reconstructs flows, and provides a web UI for zones, rules, and topology.
+NetWall Flow Analyzer ingests Clavister NetWall firewall connection logs (UDP syslog or file upload), reconstructs flows, and provides a web UI for zones, rules, and topology.
 
 ## Architecture
 
@@ -80,21 +80,6 @@ The backend is configured via **command-line arguments** (and optionally environ
 | `--classification-precedence` | `zone_first` | Zone vs interface precedence for recv/dest |
 
 See `.env.example` for suggested environment variable names if you use a process manager or Docker.
-
-## Screenshots
-
-_Placeholder: add screenshots of the dashboard, zone view, and flow graph here._
-
-## What not to commit
-
-Do **not** commit secrets, local runtime, or build artifacts. The root `.gitignore` excludes:
-
-- `.env` (secrets)
-- `backend/.venv/`, `frontend/node_modules/`
-- `*.db`, `*.db-shm`, `*.db-wal`
-- `backend/uploads/`, `frontend/dist/`
-- `backend/.pytest_cache/`, `backend/*.egg-info/`
-- IDE/OS files (e.g. `.idea/`, `.DS_Store`)
 
 ## License
 
