@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
-from ..storage.models import Event, RawLog
+from ..storage.models import Event, IngestJob, RawLog
 from ..storage.settings import get_all_settings, get_setting, set_setting
 
 logger = logging.getLogger("netwall.settings")
@@ -150,6 +150,10 @@ def run_cleanup(session_factory, engine) -> Dict[str, Any]:
 
         keep_days = int(retention.get("keep_days", 3))
         cutoff = datetime.now(timezone.utc) - timedelta(days=keep_days)
+
+        # SQLite: skip cleanup when an ingest job is running to avoid lock contention
+        if db.execute(select(IngestJob.id).where(IngestJob.status.in_(["queued", "running"])).limit(1)).first():
+            return {"skipped": True, "reason": "ingest job in progress", "cutoff": cutoff.isoformat()}
 
         # Only purge data for firewalls that are syslog-only (never imported); imported firewalls are retention-exempt
         syslog_only_keys = get_syslog_only_device_keys_for_retention(db)

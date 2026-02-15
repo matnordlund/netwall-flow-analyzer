@@ -90,7 +90,10 @@ async def _run_syslog(config: AppConfig, shutdown_event: asyncio.Event, ingestor
     logger.info("Starting UDP syslog receiver on %s:%s", config.syslog_host, config.syslog_port)
 
     async def handler(line: str) -> None:
-        await ingestor.handle_line(line)
+        try:
+            await ingestor.handle_line(line)
+        except Exception:
+            logger.exception("Syslog handler failed (line dropped)")
 
     await run_syslog_udp_server(
         host=config.syslog_host,

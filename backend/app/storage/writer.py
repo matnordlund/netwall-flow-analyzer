@@ -196,18 +196,27 @@ class Writer:
             "mac": mac,
             "device_name": device_name,
         }
+        set_: dict = {}
+        if device_name is not None:
+            set_["device_name"] = device_name
         if dialect == "postgresql":
             ins = pg_insert(table).values(**values)
-            stmt = ins.on_conflict_do_update(
-                constraint="uq_endpoint_device_ip_mac",
-                set_={"device_name": device_name} if device_name else {},
-            )
+            if set_:
+                stmt = ins.on_conflict_do_update(
+                    constraint="uq_endpoint_device_ip_mac",
+                    set_=set_,
+                )
+            else:
+                stmt = ins.on_conflict_do_nothing(constraint="uq_endpoint_device_ip_mac")
         else:
             ins = sqlite_insert(table).values(**values)
-            stmt = ins.on_conflict_do_update(
-                index_elements=ENDPOINT_UQ,
-                set_={"device_name": device_name} if device_name else {},
-            )
+            if set_:
+                stmt = ins.on_conflict_do_update(
+                    index_elements=ENDPOINT_UQ,
+                    set_=set_,
+                )
+            else:
+                stmt = ins.on_conflict_do_nothing(index_elements=ENDPOINT_UQ)
         session.execute(stmt)
 
     def _upsert_flows_from_events(
