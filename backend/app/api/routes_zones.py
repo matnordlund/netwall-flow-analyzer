@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query, Request
-from sqlalchemy import case, func, or_, select, union, union_all
+from sqlalchemy import func, or_, select, union, union_all
 from sqlalchemy.orm import Session
 
 from ..api.device_resolve import resolve_device
@@ -562,14 +562,54 @@ def list_known_endpoints(
         nat_sq = _nat_translated_ips_subquery(device_list)
         nat_ip_col = list(nat_sq.c)[0]
 
-        # ── Normalise empty-string MACs to NULL so GROUP BY treats them identically ──
-        mac_norm = case(
-            (Endpoint.mac == "", None),
-            else_=Endpoint.mac,
-        ).label("mac_norm")
+        # ── Single endpoint-candidates view: union src + dest from events, normalize MAC (empty -> NULL) ──
+        mac_norm_src = func.nullif(Event.src_mac, "")
+        mac_norm_dst = func.nullif(Event.dest_mac, "")
+        _ev_where = [
+            Event.device.in_(device_list),
+            Event.src_ip.isnot(None),
+        ]
+        _ev_where_dst = [
+            Event.device.in_(device_list),
+            Event.dest_ip.isnot(None),
+        ]
+        src_q = (
+            select(
+                Event.src_ip.label("ip"),
+                mac_norm_src.label("mac"),
+                Event.ts_utc.label("ts_utc"),
+                Event.device.label("device"),
+            )
+            .where(*_ev_where)
+            .where(Event.src_ip.notin_(select(nat_ip_col)))
+        )
+        dst_q = (
+            select(
+                Event.dest_ip.label("ip"),
+                mac_norm_dst.label("mac"),
+                Event.ts_utc.label("ts_utc"),
+                Event.device.label("device"),
+            )
+            .where(*_ev_where_dst)
+            .where(Event.dest_ip.notin_(select(nat_ip_col)))
+        )
+        ev = union_all(src_q, dst_q).subquery("ev")
 
-        # ── Endpoint aggregation: one row per (ip, mac) across all member devices ──
-        # Pick best metadata via MAX (prefers non-NULL/non-empty over NULL).
+        # ── Single aggregation over union: GROUP BY (ip, mac) only; safe on SQLite and PostgreSQL ──
+        agg = (
+            select(
+                ev.c.ip.label("ip"),
+                ev.c.mac.label("mac"),
+                func.count().label("seen_count"),
+                func.min(ev.c.ts_utc).label("first_seen"),
+                func.max(ev.c.ts_utc).label("last_seen"),
+            )
+            .where(ev.c.ip.isnot(None))
+            .group_by(ev.c.ip, ev.c.mac)
+        ).subquery("agg")
+
+        # ── Endpoint enrichment: one row per (ip, mac) from endpoints table ──
+        ep_mac_norm = func.nullif(Endpoint.mac, "")
         ep_name_expr = func.max(func.coalesce(Endpoint.hostname, Endpoint.device_name)).label("ep_name")
         ep_hostname_expr = func.max(Endpoint.hostname).label("ep_hostname")
         ep_device_name_expr = func.max(Endpoint.device_name).label("ep_device_name")
@@ -578,17 +618,15 @@ def list_known_endpoints(
         ep_os_name_expr = func.max(Endpoint.device_os_name).label("ep_os_name")
         ep_brand_expr = func.max(Endpoint.device_brand).label("ep_brand")
         ep_model_expr = func.max(Endpoint.device_model).label("ep_model")
-        ep_id_expr = func.min(Endpoint.id).label("ep_id")  # representative id
-
+        ep_id_expr = func.min(Endpoint.id).label("ep_id")
         base_where = [
             Endpoint.device.in_(device_list),
             Endpoint.ip.notin_(select(nat_ip_col)),
         ]
-
         ep_agg = (
             select(
                 Endpoint.ip.label("ep_ip"),
-                mac_norm,
+                ep_mac_norm.label("mac_norm"),
                 ep_id_expr,
                 ep_name_expr,
                 ep_hostname_expr,
@@ -600,62 +638,22 @@ def list_known_endpoints(
                 ep_model_expr,
             )
             .where(*base_where)
-            .group_by(Endpoint.ip, mac_norm)
+            .group_by(Endpoint.ip, ep_mac_norm)
         ).subquery("ep_agg")
 
-        # ── Event-stats subquery: aggregate across ALL member devices, group by (ip, mac) ──
-        src_agg = (
-            select(
-                Event.src_ip.label("ev_ip"),
-                case((Event.src_mac == "", None), else_=Event.src_mac).label("ev_mac"),
-                func.count(Event.id).label("cnt"),
-                func.min(Event.ts_utc).label("first"),
-                func.max(Event.ts_utc).label("last"),
-            )
-            .where(Event.device.in_(device_list))
-            .group_by(Event.src_ip, case((Event.src_mac == "", None), else_=Event.src_mac))
-        ).subquery("src_agg")
-
-        dst_agg = (
-            select(
-                Event.dest_ip.label("ev_ip"),
-                case((Event.dest_mac == "", None), else_=Event.dest_mac).label("ev_mac"),
-                func.count(Event.id).label("cnt"),
-                func.min(Event.ts_utc).label("first"),
-                func.max(Event.ts_utc).label("last"),
-            )
-            .where(Event.device.in_(device_list))
-            .group_by(Event.dest_ip, case((Event.dest_mac == "", None), else_=Event.dest_mac))
-        ).subquery("dst_agg")
-
-        ev_union = union_all(
-            select(src_agg.c.ev_ip, src_agg.c.ev_mac,
-                   src_agg.c.cnt, src_agg.c.first, src_agg.c.last),
-            select(dst_agg.c.ev_ip, dst_agg.c.ev_mac,
-                   dst_agg.c.cnt, dst_agg.c.first, dst_agg.c.last),
-        ).subquery("ev_union")
-
-        stats_sq = (
-            select(
-                ev_union.c.ev_ip,
-                ev_union.c.ev_mac,
-                func.sum(ev_union.c.cnt).label("seen_count"),
-                func.min(ev_union.c.first).label("first_seen"),
-                func.max(ev_union.c.last).label("last_seen"),
-            )
-            .group_by(ev_union.c.ev_ip, ev_union.c.ev_mac)
-        ).subquery("stats_sq")
-
-        # ── Join aggregated endpoints to aggregated stats ──
-        seen_count_col = func.coalesce(stats_sq.c.seen_count, 0).label("seen_count")
-        first_seen_col = stats_sq.c.first_seen.label("first_seen")
-        last_seen_col = stats_sq.c.last_seen.label("last_seen")
-
+        # ── Join event-driven list to endpoint enrichment (same column names as before for search/sort/response) ──
+        seen_count_col = agg.c.seen_count.label("seen_count")
+        first_seen_col = agg.c.first_seen.label("first_seen")
+        last_seen_col = agg.c.last_seen.label("last_seen")
+        _join_on = (agg.c.ip == ep_agg.c.ep_ip) & (
+            (agg.c.mac == ep_agg.c.mac_norm)
+            | (agg.c.mac.is_(None) & ep_agg.c.mac_norm.is_(None))
+        )
         joined = (
             select(
                 ep_agg.c.ep_id,
-                ep_agg.c.ep_ip,
-                ep_agg.c.mac_norm,
+                agg.c.ip.label("ep_ip"),
+                agg.c.mac.label("mac_norm"),
                 ep_agg.c.ep_name,
                 ep_agg.c.ep_hostname,
                 ep_agg.c.ep_device_name,
@@ -668,14 +666,8 @@ def list_known_endpoints(
                 first_seen_col,
                 last_seen_col,
             )
-            .outerjoin(
-                stats_sq,
-                (ep_agg.c.ep_ip == stats_sq.c.ev_ip)
-                & (
-                    (ep_agg.c.mac_norm == stats_sq.c.ev_mac)
-                    | (ep_agg.c.mac_norm.is_(None) & stats_sq.c.ev_mac.is_(None))
-                ),
-            )
+            .select_from(agg)
+            .outerjoin(ep_agg, _join_on)
         )
 
         # ── Search filter (applied to aggregated columns + enriched vendor/type/os from device_identifications and overrides) ──
@@ -685,8 +677,8 @@ def list_known_endpoints(
             search_conditions = [
                 ep_agg.c.ep_hostname.ilike(like_pat),
                 ep_agg.c.ep_device_name.ilike(like_pat),
-                ep_agg.c.ep_ip.ilike(like_pat),
-                ep_agg.c.mac_norm.ilike(like_pat),
+                agg.c.ip.ilike(like_pat),
+                agg.c.mac.ilike(like_pat),
                 ep_agg.c.ep_vendor.ilike(like_pat),
                 ep_agg.c.ep_type_name.ilike(like_pat),
                 ep_agg.c.ep_os_name.ilike(like_pat),
@@ -727,7 +719,7 @@ def list_known_endpoints(
             ]
             enriched_macs = list(dict.fromkeys(di_macs + ov_macs))
             if enriched_macs:
-                search_conditions.append(ep_agg.c.mac_norm.in_(enriched_macs))
+                search_conditions.append(agg.c.mac.in_(enriched_macs))
             joined = joined.where(or_(*search_conditions))
 
         # ── Local-only CIDR filter ──
@@ -751,10 +743,13 @@ def list_known_endpoints(
                     pass
             if networks:
                 # Fetch all distinct IPs from current joined set, check in Python, build allowlist
-                ip_sq = select(ep_agg.c.ep_ip).distinct()
+                jsub = joined.subquery()
+                ip_sq = select(jsub.c.ep_ip).select_from(jsub).distinct()
                 all_ips = [row[0] for row in db.execute(ip_sq).all()]
                 local_ips: set[str] = set()
                 for ip_str in all_ips:
+                    if not ip_str:
+                        continue
                     try:
                         addr = ipaddress.ip_address(ip_str)
                         if any(addr in net for net in networks):
@@ -762,8 +757,7 @@ def list_known_endpoints(
                     except ValueError:
                         pass
                 if local_ips:
-                    # Filter joined query to only include IPs in the local set
-                    joined = joined.where(ep_agg.c.ep_ip.in_(local_ips))
+                    joined = joined.where(agg.c.ip.in_(local_ips))
                 else:
                     return {"page": page, "page_size": page_size, "total": 0, "items": []}
 
@@ -777,8 +771,8 @@ def list_known_endpoints(
         # ── Sorting ──
         _SORT_MAP = {
             "name": ep_agg.c.ep_name,
-            "ip": ep_agg.c.ep_ip,
-            "mac": ep_agg.c.mac_norm,
+            "ip": agg.c.ip,
+            "mac": agg.c.mac,
             "vendor": ep_agg.c.ep_vendor,
             "type": ep_agg.c.ep_type_name,
             "os": ep_agg.c.ep_os_name,
@@ -798,11 +792,11 @@ def list_known_endpoints(
                 order_clauses.append(col.asc().nulls_last() if sort_by in _SORT_NULLS_LAST else col.asc())
 
         if not order_clauses:
-            order_clauses.append(ep_agg.c.ep_id.desc())
+            order_clauses.append(ep_agg.c.ep_id.desc().nulls_last())
 
         # Tie-breaker
-        order_clauses.append(ep_agg.c.ep_ip.asc())
-        order_clauses.append(ep_agg.c.ep_id.asc())
+        order_clauses.append(agg.c.ip.asc())
+        order_clauses.append(ep_agg.c.ep_id.asc().nulls_last())
 
         offset = (page - 1) * page_size
         rows = db.execute(
