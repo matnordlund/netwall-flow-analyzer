@@ -2,6 +2,19 @@
 
 NetWall Flow Analyzer ingests Clavister NetWall firewall connection logs (UDP syslog or file upload), reconstructs flows, and provides a web UI for zones, rules, and topology.
 
+### Ingested log IDs
+
+The backend accepts syslog records whose `id` (structured-data) starts with:
+
+| ID prefix | Type   | Use |
+|-----------|--------|-----|
+| `0060` / `60` | **CONN** | Connection logs. Used to build events and flows: zones, rules, topology, and traffic views. (InControl may send e.g. `600004`.) |
+| `0890` / `89` | **DEVICE** | Device identification logs. Used to upsert device inventory (MAC, IP, vendor, type, hostname) and to sync endpoint metadata. (InControl may send e.g. `890001`.) |
+
+Records with any other `id` are stored as raw logs but not processed into events or device records.
+
+**Clavister NetWall:** When sending logs from a NetWall firewall to this analyzer, set **RFC5424 compliance** on the syslog configuration so that messages use the expected format (e.g. structured data with `id=...`) and can be parsed correctly.
+
 ## Architecture
 
 - **Backend** (Python, FastAPI): HTTP API, UDP syslog receiver, file-upload ingest, flow aggregation, PostgreSQL or SQLite storage. Optional static serving of the built frontend.

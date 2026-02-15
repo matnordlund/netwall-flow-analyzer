@@ -2,6 +2,9 @@
   "name": "netwall-flow-analyzer-frontend",
   "version": "0.1.0",
   "private": true,
+  "overrides": {
+    "esbuild": ">=0.25.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -16,6 +19,7 @@
     "reactflow": "^11.11.0"
   },
   "devDependencies": {
+    "esbuild": ">=0.25.0",
     "@tailwindcss/postcss": "^4.1.18",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
