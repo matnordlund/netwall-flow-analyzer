@@ -211,6 +211,7 @@ async def process_ingest_job(
             ingestor.upload_writer = writer
             ingestor.upload_raw_batch = []
             ingestor.upload_event_batch = []
+            ingestor.upload_flow_events = []
             ingestor.upload_batch_size = 5000
             ingestor.upload_job_id = job_id
             ingestor.upload_get_lines_processed = lambda: lines_processed
@@ -267,9 +268,17 @@ async def process_ingest_job(
             ingestor.upload_writer = None
             ingestor.upload_raw_batch = None
             ingestor.upload_event_batch = None
+            ingestor.upload_flow_events = None
             ingestor.upload_job_id = None
             ingestor.upload_get_lines_processed = None
-            ingest_session.close()
+            try:
+                ingest_session.rollback()
+            except Exception:  # noqa: S110
+                pass
+            try:
+                ingest_session.close()
+            except Exception:  # noqa: S110
+                pass
 
         # Final job update and status=done on a new session (ingest session is closed, no lock)
         now = datetime.now(timezone.utc)

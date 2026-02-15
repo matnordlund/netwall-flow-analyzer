@@ -14,7 +14,7 @@ from ..storage.models import DeviceIdentification, Endpoint, Event, IngestJob, R
 from ..storage.event_writer import EventWriter
 from ..storage.firewall_source import get_canonical_device_key, upsert_firewall_syslog
 from ..enrichment.classification import apply_direction_classification
-from ..aggregation.flows import update_flows_for_event
+from ..aggregation.flows import update_flows_for_events_batch, update_flows_for_event
 from .stats import ingest_stats
 
 logger = logging.getLogger("netwall.ingest")
@@ -595,7 +595,6 @@ def _upsert_device_identification(
         existing.last_seen = parsed.ts_utc
         # Store raw kv in json for audit
         existing.raw_event_json = {k: v for k, v in kv.items()}
-        db.flush()
         return existing
     di = DeviceIdentification(
         firewall_device=parsed.device,
@@ -606,7 +605,6 @@ def _upsert_device_identification(
         **{k: v for k, v in new_fields.items() if v is not None},
     )
     db.add(di)
-    db.flush()
     return di
 
 
@@ -722,6 +720,7 @@ class SyslogIngestor:
     upload_writer: Optional[EventWriter] = field(default=None, repr=False)
     upload_raw_batch: Optional[List[dict]] = field(default=None, repr=False)
     upload_event_batch: Optional[List[dict]] = field(default=None, repr=False)
+    upload_flow_events: Optional[List] = field(default=None, repr=False)  # Event ORM models for batch flow update
     upload_batch_size: int = 5000
     upload_job_id: Optional[str] = field(default=None, repr=False)
     upload_get_lines_processed: Optional[Any] = field(default=None, repr=False)  # callable returning int (lines_processed)
@@ -745,11 +744,15 @@ class SyslogIngestor:
             return
         raw_batch = self.upload_raw_batch or []
         event_batch = self.upload_event_batch or []
+        flow_events = self.upload_flow_events or []
         if not raw_batch and not event_batch:
             return
         try:
             self.upload_writer.insert_raw_logs(self.upload_session, raw_batch)
             self.upload_writer.insert_events(self.upload_session, event_batch)
+            # Flow aggregation: one flush per batch (endpoints then flow rows); no flush inside helpers
+            if flow_events:
+                update_flows_for_events_batch(self.upload_session, flow_events, self.config)
             # Update job row on same session so we don't open a second writer (SQLite: one writer at a time)
             if self.upload_job_id and self.upload_collector is not None and self.upload_get_lines_processed is not None:
                 j = self.upload_session.get(IngestJob, self.upload_job_id)
@@ -768,12 +771,15 @@ class SyslogIngestor:
                 self.upload_raw_batch.clear()
             if self.upload_event_batch is not None:
                 self.upload_event_batch.clear()
+            if self.upload_flow_events is not None:
+                self.upload_flow_events.clear()
             ingest_stats.touch()
         except Exception as exc:  # noqa: BLE001
             ingest_stats.batch_errors += 1
             ingest_stats.touch()
-            logger.exception("Failed to persist batch, rolling back: %s", exc)
-            self.upload_session.rollback()
+            logger.exception("Failed to persist batch: %s", exc)
+            # Do not rollback here; bubble so caller can rollback once at transaction boundary.
+            raise
 
     async def _process_records(self, records: Iterable[str]) -> None:
         batch_mode = self.upload_writer is not None and self.upload_session is not None
@@ -851,10 +857,12 @@ class SyslogIngestor:
                             event=event_model,
                             precedence=self.config.classification_precedence,
                         )
-                        update_flows_for_event(db, event_model, self.config)
                         if batch_mode and self.upload_event_batch is not None:
                             self.upload_event_batch.append(_event_to_dict(event_model))
+                            if self.upload_flow_events is not None:
+                                self.upload_flow_events.append(event_model)
                         else:
+                            update_flows_for_event(db, event_model, self.config)
                             db.add(event_model)
                         ingest_stats.events_saved += 1
                         if self.upload_collector is not None:
@@ -866,9 +874,17 @@ class SyslogIngestor:
         except Exception as exc:  # noqa: BLE001
             ingest_stats.batch_errors += 1
             ingest_stats.touch()
-            logger.exception("Failed to persist records, rolling back: %s", exc)
-            db.rollback()
+            logger.exception("Failed to persist records: %s", exc)
+            if not batch_mode:
+                try:
+                    db.rollback()
+                except Exception:  # noqa: S110
+                    pass
+            raise
         finally:
             if not batch_mode:
-                db.close()
+                try:
+                    db.close()
+                except Exception:  # noqa: S110
+                    pass
 

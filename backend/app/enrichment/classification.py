@@ -4,7 +4,6 @@ import logging
 from typing import Optional
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import ClassificationPrecedence
@@ -66,23 +65,9 @@ def _record_unclassified(
         existing.count += 1
         return
 
-    # 3) Create
+    # 3) Create and add only; do not flush. Let the outer transaction flush/commit once per batch.
     ep = UnclassifiedEndpoint(device=device, kind=kind, name=name, count=1)
     db.add(ep)
-
-    # 4) Flush safely (handles race conditions + Postgres strictness)
-    try:
-        db.flush()
-    except IntegrityError:
-        db.rollback()
-        existing = db.execute(
-            select(UnclassifiedEndpoint).where(
-                UnclassifiedEndpoint.device == device,
-                UnclassifiedEndpoint.kind == kind,
-                UnclassifiedEndpoint.name == name,
-            )
-        ).scalar_one()
-        existing.count += 1
 
 
 def derive_side_for_endpoint(

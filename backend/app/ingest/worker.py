@@ -115,7 +115,7 @@ def run_worker_loop(session_factory, config, syslog_ingestor, stop_event) -> Non
             # Log final state (processor sets done/error/canceled)
             db = session_factory()
             try:
-                j = db.get(IngestJob, job.id)
+                j = db.get(IngestJob, job_id)
                 if j:
                     logger.info(
                         "Job finished state=%s job_id=%s events_inserted=%s error=%s",

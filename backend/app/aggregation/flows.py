@@ -35,6 +35,12 @@ def _get_or_create_endpoint(
         return None
 
     mac_norm = mac or None
+    # Check pending (new) objects in this session to avoid duplicate add in same batch
+    for obj in db.new:
+        if isinstance(obj, Endpoint) and obj.device == device and obj.ip == ip and (mac_norm == obj.mac or (mac_norm is None and obj.mac is None)):
+            if device_name and not obj.device_name:
+                obj.device_name = device_name
+            return obj
     stmt = select(Endpoint).where(
         Endpoint.device == device,
         Endpoint.ip == ip,
@@ -44,7 +50,7 @@ def _get_or_create_endpoint(
     if ep is None:
         ep = Endpoint(device=device, ip=ip, mac=mac_norm, device_name=device_name)
         db.add(ep)
-        db.flush()
+        # Do not flush here; let the outer transaction flush/commit once per batch.
     else:
         # Backfill device_name if we learn it later.
         if device_name and not ep.device_name:
@@ -122,7 +128,7 @@ def _update_flow_row(
         }
         stmt = ins.on_conflict_do_update(index_elements=_FLOW_IDENTITY, set_=update_set)
     db.execute(stmt)
-    db.flush()
+    # Do not flush here; let the outer transaction flush/commit once per batch.
 
     # Merge rule/app counts (not expressible in SQLite upsert). Limit 1 to avoid MultipleResultsFound if duplicates exist before dedup.
     flow = db.execute(
@@ -147,16 +153,11 @@ def _update_flow_row(
             flow.top_apps[event.app_name] = flow.top_apps.get(event.app_name, 0) + 1
 
 
-def update_flows_for_event(db: Session, event: Event, config: AppConfig) -> None:
-    """Update aggregated flows for a single event.
-
-    We currently only aggregate conn_open and conn_open_natsat events.
-    """
-    if event.event_type not in {"conn_open", "conn_open_natsat"}:
-        return
-
-    # Original vs translated endpoints.
-    # Original
+def _ensure_endpoints_for_event(
+    db: Session,
+    event: Event,
+) -> tuple:
+    """Get or create (add only, no flush) the four endpoints for an event. Returns (src_orig, dst_orig, src_nat, dst_nat)."""
     src_orig = _get_or_create_endpoint(
         db,
         device=event.device,
@@ -171,8 +172,6 @@ def update_flows_for_event(db: Session, event: Event, config: AppConfig) -> None
         mac=event.dest_mac,
         device_name=event.dest_device,
     )
-
-    # Translated (prefer NAT IPs when present).
     src_ip_nat = event.xlat_src_ip or event.src_ip
     dst_ip_nat = event.xlat_dest_ip or event.dest_ip
     src_nat = _get_or_create_endpoint(
@@ -189,19 +188,30 @@ def update_flows_for_event(db: Session, event: Event, config: AppConfig) -> None
         mac=event.dest_mac,
         device_name=event.dest_device,
     )
+    return (src_orig, dst_orig, src_nat, dst_nat)
 
-    # Basis values: side, zone, interface.
+
+def _add_flow_rows_for_event(
+    db: Session,
+    event: Event,
+    src_orig: Optional[Endpoint],
+    dst_orig: Optional[Endpoint],
+    src_nat: Optional[Endpoint],
+    dst_nat: Optional[Endpoint],
+) -> None:
+    """Write flow rows for one event. Endpoints must already be flushed so .id is set."""
     bases = [
         ("side", event.recv_side, event.dest_side),
         ("zone", event.recv_zone, event.dest_zone),
         ("interface", event.recv_if, event.dest_if),
     ]
-
     for view_kind, src_ep, dst_ep in [
         ("original", src_orig, dst_orig),
         ("translated", src_nat, dst_nat),
     ]:
         if src_ep is None or dst_ep is None:
+            continue
+        if src_ep.id is None or dst_ep.id is None:
             continue
         for basis, from_val, to_val in bases:
             _update_flow_row(
@@ -217,4 +227,40 @@ def update_flows_for_event(db: Session, event: Event, config: AppConfig) -> None
                 view_kind=view_kind,
                 event=event,
             )
+
+
+def update_flows_for_events_batch(
+    db: Session,
+    events: list[Event],
+    config: AppConfig,
+) -> None:
+    """Update aggregated flows for a batch of events. One flush after all endpoints, then flow rows. Safe for use from ingest batch."""
+    if not events:
+        return
+    # 1) Get or create all endpoints (add only, no flush)
+    endpoint_tuples = []
+    for event in events:
+        if event.event_type not in {"conn_open", "conn_open_natsat"}:
+            endpoint_tuples.append(None)
+            continue
+        endpoint_tuples.append(_ensure_endpoints_for_event(db, event))
+    # 2) Single flush so new endpoints get IDs
+    db.flush()
+    # 3) Add flow rows (no flush)
+    for event, eps in zip(events, endpoint_tuples):
+        if event.event_type not in {"conn_open", "conn_open_natsat"}:
+            continue
+        if eps is None:
+            continue
+        src_orig, dst_orig, src_nat, dst_nat = eps
+        _add_flow_rows_for_event(db, event, src_orig, dst_orig, src_nat, dst_nat)
+
+
+def update_flows_for_event(db: Session, event: Event, config: AppConfig) -> None:
+    """Update aggregated flows for a single event. Uses one flush after endpoints so IDs are assigned."""
+    if event.event_type not in {"conn_open", "conn_open_natsat"}:
+        return
+    src_orig, dst_orig, src_nat, dst_nat = _ensure_endpoints_for_event(db, event)
+    db.flush()
+    _add_flow_rows_for_event(db, event, src_orig, dst_orig, src_nat, dst_nat)
 
