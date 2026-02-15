@@ -877,8 +877,10 @@ class SyslogIngestor:
                 if self.upload_collector is not None:
                     self.upload_collector.record_raw(parsed.device, parsed.ts_utc)
                 if not batch_mode and parsed.device and parsed.ts_utc:
+                    # Use DB-based canonical key: only merge to ha:base when user has enabled HA cluster; else treat _Master/_Slave as standalone SYSLOG
                     device_key = get_canonical_device_key(db, parsed.device)
-                    upsert_firewall_syslog(db, device_key, parsed.ts_utc)
+                    if device_key:
+                        upsert_firewall_syslog(db, device_key, parsed.ts_utc)
 
                 if parsed.parse_status != "ok":
                     continue

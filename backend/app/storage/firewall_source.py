@@ -41,9 +41,7 @@ def upsert_firewall_syslog(db: Session, device_key: str, ts_utc: datetime) -> No
             updated_at=now,
         ))
     else:
-        # Import wins: do not overwrite import with syslog (so retention never purges imported firewalls)
-        if row.source_import != 1:
-            row.source_syslog = 1
+        row.source_syslog = 1
         first = _ensure_utc(row.first_seen_ts)
         last = _ensure_utc(row.last_seen_ts)
         if first is None or ts_utc < first:

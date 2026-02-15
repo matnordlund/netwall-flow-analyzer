@@ -8,8 +8,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Request
-from sqlalchemy import delete, func, select
+from fastapi import APIRouter, Body, HTTPException, Request
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from ..api.device_resolve import resolve_device
@@ -168,12 +168,13 @@ def list_firewalls(request: Request):
             source_syslog = bool(inv and inv.source_syslog)
             source_import = bool(inv and inv.source_import)
             last_import_ts = _iso(inv.last_import_ts) if inv and inv.last_import_ts else None
-            # Pills for UI: import wins — if ever imported, show only IMPORT (never SYSLOG)
+            # Pills for UI: show both when both (SYSLOG / IMPORT / MIXED)
+            source_display = []
+            if source_syslog:
+                source_display.append("SYSLOG")
             if source_import:
-                source_display = ["IMPORT"]
-            elif source_syslog:
-                source_display = ["SYSLOG"]
-            else:
+                source_display.append("IMPORT")
+            if not source_display:
                 source_display = ["—"]
 
             active_jobs_for_device = device_to_jobs.get(device_key, [])
@@ -294,6 +295,30 @@ def update_firewall_override(request: Request, device_key: str, body: Dict[str, 
             "comment": o.comment,
             "updated_at": _iso(o.updated_at),
         }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+@router.patch("/firewalls/{device_key}/retention", response_model=Dict[str, Any])
+def set_firewall_retention(request: Request, device_key: str, body: Dict[str, Any] = Body(...)):
+    """Set firewall to syslog-only for retention: clear source_import so retention cleanup will purge old logs.
+    Body: {"apply_retention": true}. Use when a firewall shows SYSLOG+IMPORT but should be treated as SYSLOG only."""
+    if not body.get("apply_retention"):
+        raise HTTPException(status_code=400, detail="apply_retention must be true")
+    db: Session = get_db(request)
+    try:
+        inv = db.get(FirewallInventory, device_key)
+        if not inv:
+            raise HTTPException(status_code=404, detail="Firewall not found in inventory")
+        inv.source_import = 0
+        inv.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return {"ok": True, "device_key": device_key, "message": "Retention will apply to this firewall (syslog-only)."}
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))

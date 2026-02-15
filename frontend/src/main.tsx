@@ -3446,12 +3446,16 @@ function FirewallSourceBadges({
   activeImportJobs,
   onOpenImportStatus,
   onOpenFirewallDetails,
+  deviceKey,
+  onApplyRetention,
 }: {
   source?: { syslog: boolean; import: boolean; last_import_ts?: string | null; source_display?: string[] };
   isImporting?: boolean;
   activeImportJobs?: ActiveImportJob[];
   onOpenImportStatus?: (jobId: string) => void;
   onOpenFirewallDetails?: () => void;
+  deviceKey?: string;
+  onApplyRetention?: (deviceKey: string) => void;
 }) {
   const firstJobId = activeImportJobs?.[0]?.job_id;
   const progressPct = activeImportJobs?.[0]?.progress != null ? Math.round(activeImportJobs[0].progress * 100) : null;
@@ -3517,9 +3521,21 @@ function FirewallSourceBadges({
           )}
           {!display && !source.syslog && !source.import && !isImporting && <span className="text-muted-foreground text-xs">—</span>}
           {(isImporting || display?.includes('IMPORT') || (source.import && !source.syslog)) && (
-            <span className="text-[10px] text-muted-foreground italic" title="Not removed by log retention">
-              Retention excluded
-            </span>
+            <>
+              <span className="text-[10px] text-muted-foreground italic" title="Not removed by log retention">
+                Retention excluded
+              </span>
+              {!isImporting && source?.import && deviceKey && onApplyRetention && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onApplyRetention(deviceKey); }}
+                  className="text-[10px] text-primary hover:underline ml-1"
+                  title="Treat as syslog-only so retention will apply"
+                >
+                  Apply retention
+                </button>
+              )}
+            </>
           )}
         </>
       )}
@@ -3543,6 +3559,22 @@ type FirewallRow = {
 
 function FirewallInventoryPage({ onOpenImportStatus }: { onOpenImportStatus?: (jobId: string) => void }) {
   const queryClient = useQueryClient();
+  const handleApplyRetention = async (deviceKey: string) => {
+    try {
+      const res = await fetch(`${API}/firewalls/${encodeURIComponent(deviceKey)}/retention`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apply_retention: true }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || res.statusText);
+      }
+      await queryClient.invalidateQueries({ queryKey: ['firewalls'] });
+    } catch (e) {
+      console.error('Apply retention failed:', e);
+    }
+  };
   const { data: listRaw, isFetching } = useQuery({
     queryKey: ['firewalls'],
     queryFn: async () => {
@@ -3741,6 +3773,8 @@ function FirewallInventoryPage({ onOpenImportStatus }: { onOpenImportStatus?: (j
                       activeImportJobs={r.active_import_jobs}
                       onOpenImportStatus={onOpenImportStatus}
                       onOpenFirewallDetails={() => setSelected(r)}
+                      deviceKey={r.device_key}
+                      onApplyRetention={handleApplyRetention}
                     />
                   </td>
                   <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{fmtTs(r.oldest_log)}</td>
