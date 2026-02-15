@@ -135,10 +135,17 @@ def list_devices(request: Request):
 
 @router.get("/devices/ha-candidates", response_model=List[Dict[str, Any]])
 def list_ha_candidates(request: Request):
-    """Return detected HA pairs: devices with both <base>_Master and <base>_Slave (case-sensitive)."""
+    """Return detected HA pairs from syslog-only devices: both <base>_Master and <base>_Slave (case-sensitive).
+    Import firewalls are never HA candidates."""
     db: Session = get_db(request)
     try:
-        stmt = select(Event.device).where(Event.device.isnot(None)).distinct()
+        stmt = (
+            select(Event.device)
+            .where(Event.device.isnot(None))
+            .where((Event.ingest_source == "syslog") | (Event.ingest_source.is_(None)))
+            .where(or_(Event.device.endswith(HA_MASTER_SUFFIX), Event.device.endswith(HA_SLAVE_SUFFIX)))
+            .distinct()
+        )
         rows = db.execute(stmt).scalars().all()
         devices = _normalize_single_column_strings(rows)
         return _ha_candidates_from_device_set(devices)

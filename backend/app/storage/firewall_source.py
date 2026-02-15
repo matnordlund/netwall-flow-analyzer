@@ -33,6 +33,7 @@ def upsert_firewall_syslog(db: Session, device_key: str, ts_utc: datetime) -> No
     if not row:
         db.add(FirewallInventory(
             device_key=device_key,
+            source_type="syslog",
             source_syslog=1,
             source_import=0,
             first_seen_ts=ts_utc,
@@ -42,6 +43,8 @@ def upsert_firewall_syslog(db: Session, device_key: str, ts_utc: datetime) -> No
         ))
     else:
         row.source_syslog = 1
+        if row.source_type is None:
+            row.source_type = "syslog"
         first = _ensure_utc(row.first_seen_ts)
         last = _ensure_utc(row.last_seen_ts)
         if first is None or ts_utc < first:
@@ -73,6 +76,7 @@ def upsert_firewall_import(
     if not row:
         db.add(FirewallInventory(
             device_key=device_key,
+            source_type="import",
             source_syslog=0,
             source_import=1,
             first_seen_ts=first_ts,
@@ -82,6 +86,8 @@ def upsert_firewall_import(
         ))
     else:
         row.source_import = 1
+        if row.source_type is None:
+            row.source_type = "import"
         row.last_import_ts = now
         first = _ensure_utc(row.first_seen_ts)
         last = _ensure_utc(row.last_seen_ts)

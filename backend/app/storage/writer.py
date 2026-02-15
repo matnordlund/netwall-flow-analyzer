@@ -88,6 +88,11 @@ class Writer:
             if batch.events:
                 session.bulk_insert_mappings(Event, batch.events)
             for fk in batch.firewall_keys:
+                n_events = sum(1 for e in batch.events if (e.get("firewall_key") or e.get("device") or "").strip() == fk)
+                logger.info(
+                    "Import firewall upsert: job_id=%s firewall_key=%s ingest_source=import events_attributed=%s target=firewall_inventory.device_key=%s",
+                    job_id, fk, n_events, fk,
+                )
                 self._upsert_firewall_inventory(session, fk)
             ep_key_to_id = self._upsert_endpoints_from_events(session, batch.events)
             self._upsert_flows_from_events(session, batch.events, ep_key_to_id)
@@ -104,6 +109,7 @@ class Writer:
         dialect = session.get_bind().dialect.name
         values = {
             "device_key": device_key,
+            "source_type": "import",
             "source_syslog": 0,
             "source_import": 1,
             "first_seen_ts": now,
@@ -111,7 +117,7 @@ class Writer:
             "last_import_ts": now,
             "updated_at": now,
         }
-        # On conflict: set has_import only; do not clear source_syslog (so syslog-only HA stays SYSLOG)
+        # On conflict: set has_import only; do NOT update source_type (so syslog row stays source_type=syslog)
         if dialect == "postgresql":
             ins = pg_insert(table).values(**values)
             stmt = ins.on_conflict_do_update(

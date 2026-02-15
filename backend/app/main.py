@@ -21,6 +21,7 @@ from .storage.db import init_engine_and_sessionmaker
 from .storage import models
 from .storage.flow_index import (
     ensure_event_ha_columns,
+    ensure_firewall_source_type,
     ensure_flows_unique_index,
     ensure_ingest_job_error_columns,
     ensure_ingest_job_finished_at,
@@ -145,6 +146,7 @@ async def main_async(config: AppConfig) -> None:
     # Ensure flows table has unique index for upsert (existing DBs may lack it; SQLite only).
     ensure_flows_unique_index(engine)
     ensure_event_ha_columns(engine)
+    ensure_firewall_source_type(engine)
     ensure_ingest_job_error_columns(engine)
     ensure_ingest_job_finished_at(engine)
     ensure_ingest_job_worker_columns(engine)

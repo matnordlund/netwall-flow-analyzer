@@ -13,7 +13,7 @@ from ..config import AppConfig
 from ..storage.models import DeviceIdentification, Endpoint, Event, IngestJob, RawLog
 from ..storage.event_writer import EventWriter
 from ..storage.writer import ParsedBatch, Writer as StorageWriter
-from ..storage.ha_canonical import canonical_firewall_key
+from ..storage.ha_canonical import canonical_firewall_key_import, canonical_firewall_key_syslog
 from ..storage.firewall_source import get_canonical_device_key, upsert_firewall_syslog
 from ..enrichment.classification import apply_direction_classification
 from ..aggregation.flows import update_flows_for_events_batch, update_flows_for_event
@@ -877,7 +877,7 @@ class SyslogIngestor:
                 if self.upload_collector is not None:
                     self.upload_collector.record_raw(parsed.device, parsed.ts_utc)
                 if not batch_mode and parsed.device and parsed.ts_utc:
-                    # Use DB-based canonical key: only merge to ha:base when user has enabled HA cluster; else treat _Master/_Slave as standalone SYSLOG
+                    # Syslog: use DB canonical key so _Master/_Slave stay separate until user enables HA cluster
                     device_key = get_canonical_device_key(db, parsed.device)
                     if device_key:
                         upsert_firewall_syslog(db, device_key, parsed.ts_utc)
@@ -907,9 +907,10 @@ class SyslogIngestor:
                     # CONN log → Event model
                     _, event_model = normalize_to_models(parsed, raw_text)
                     if event_model is not None:
-                        # HA: canonical firewall key for inventory/graph; keep raw device as device_member
                         event_model.device_member = parsed.device
-                        event_model.firewall_key, _ = canonical_firewall_key(parsed.device or "")
+                        # Source from ingestion path only: import = single-node; syslog = DB canonical (separate until HA enabled)
+                        event_model.firewall_key = canonical_firewall_key_import(parsed.device or "") if batch_mode else get_canonical_device_key(db, parsed.device or "")
+                        event_model.ingest_source = "import" if batch_mode else "syslog"
                         apply_direction_classification(
                             db=db,
                             event=event_model,

@@ -14,7 +14,8 @@ from sqlalchemy.exc import MultipleResultsFound
 from ..api.device_resolve import get_device_display_label
 from ..config import AppConfig
 from ..storage.models import IngestJob
-from ..storage.firewall_source import get_canonical_device_key, upsert_firewall_import
+from ..storage.ha_canonical import canonical_firewall_key_import
+from ..storage.firewall_source import upsert_firewall_import
 from ..storage.writer import Writer as StorageWriter
 from .reconstruct import SyslogIngestor, UploadCollector
 
@@ -89,7 +90,7 @@ def _maybe_update_job_device(
         if not job or getattr(job, "device_key", None):
             return
         job.device_detected = primary
-        job.device_key = get_canonical_device_key(db, primary)
+        job.device_key = canonical_firewall_key_import(primary)
         job.device_display = get_device_display_label(db, primary)
         job.updated_at = datetime.now(timezone.utc)
         db.commit()
@@ -293,7 +294,7 @@ async def process_ingest_job(
             job.device_display = get_device_display_label(db, job.device_detected)
             job.updated_at = now
             if job.device_detected:
-                device_key = get_canonical_device_key(db, job.device_detected)
+                device_key = canonical_firewall_key_import(job.device_detected)
                 job.device_key = device_key
                 first_ts = last_ts = None
                 if job.time_min:
@@ -306,6 +307,10 @@ async def process_ingest_job(
                         last_ts = datetime.fromisoformat(job.time_max.replace("Z", "+00:00"))
                     except (ValueError, TypeError):
                         pass
+                logger.info(
+                    "Import marking firewall: job_id=%s device_detected=%s firewall_key=%s ingest_source=import events_inserted=%s target=firewall_inventory.device_key=%s",
+                    job_id, job.device_detected, device_key, job.events_inserted, device_key,
+                )
                 upsert_firewall_import(db, device_key, first_ts=first_ts, last_ts=last_ts)
             db.commit()
             logger.info(

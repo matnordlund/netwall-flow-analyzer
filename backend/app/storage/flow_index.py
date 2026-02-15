@@ -76,20 +76,42 @@ def ensure_ingest_job_finished_at(engine) -> None:
 
 
 def ensure_event_ha_columns(engine) -> None:
-    """Add device_member, firewall_key to events if missing (SQLite only). Idempotent."""
-    if engine.dialect.name != "sqlite":
-        return
-    for col, typ in [("device_member", "VARCHAR(255)"), ("firewall_key", "VARCHAR(255)")]:
+    """Add device_member, firewall_key, ingest_source to events if missing. Idempotent."""
+    for col, typ in [
+        ("device_member", "VARCHAR(255)"),
+        ("firewall_key", "VARCHAR(255)"),
+        ("ingest_source", "VARCHAR(32)"),
+    ]:
         try:
             with engine.connect() as conn:
-                conn.execute(text(f"ALTER TABLE events ADD COLUMN {col} {typ}"))
+                if engine.dialect.name == "sqlite":
+                    conn.execute(text(f"ALTER TABLE events ADD COLUMN {col} {typ}"))
+                else:
+                    conn.execute(text(f"ALTER TABLE events ADD COLUMN IF NOT EXISTS {col} {typ}"))
                 conn.commit()
             logger.info("Added events.%s", col)
         except Exception as e:  # noqa: BLE001
-            if "duplicate column name" in str(e).lower():
+            if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
                 pass
             else:
                 logger.warning("Could not add events.%s: %s", col, e)
+
+
+def ensure_firewall_source_type(engine) -> None:
+    """Add source_type to firewalls if missing. Idempotent."""
+    try:
+        with engine.connect() as conn:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("ALTER TABLE firewalls ADD COLUMN source_type VARCHAR(32)"))
+            else:
+                conn.execute(text("ALTER TABLE firewalls ADD COLUMN IF NOT EXISTS source_type VARCHAR(32)"))
+            conn.commit()
+        logger.info("Added firewalls.source_type")
+    except Exception as e:  # noqa: BLE001
+        if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+            pass
+        else:
+            logger.warning("Could not add firewalls.source_type: %s", e)
 
 
 def ensure_ingest_job_phase(engine) -> None:

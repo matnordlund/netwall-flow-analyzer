@@ -40,6 +40,7 @@ class Event(Base):
     device: Mapped[str] = mapped_column(String(255), index=True)  # kept for backward compat; prefer firewall_key for HA
     device_member: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)  # raw hostname / member
     firewall_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)  # canonical (ha:base or device)
+    ingest_source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)  # "syslog" | "import"
     event_type: Mapped[Optional[str]] = mapped_column(String(64), index=True)
     action: Mapped[Optional[str]] = mapped_column(String(64), index=True)
 
@@ -256,6 +257,7 @@ class FirewallInventory(Base):
     __tablename__ = "firewalls"
 
     device_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    source_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)  # "syslog" | "import" (single truth; do not overwrite on conflict)
     source_syslog: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # 1 if ever seen from live syslog
     source_import: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # 1 if ever imported from file
     first_seen_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

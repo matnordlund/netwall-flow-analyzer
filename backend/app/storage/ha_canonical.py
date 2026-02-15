@@ -27,3 +27,16 @@ def canonical_firewall_key(device_raw: str | None) -> tuple[str, dict]:
         key = f"ha:{base}" if base else d
         return (key, {"member": d})
     return (d, {})
+
+
+def canonical_firewall_key_syslog(device_raw: str | None) -> str:
+    """Canonical key for syslog-only: _Master/_Slave -> ha:base. Use only in syslog ingestion paths."""
+    key, _ = canonical_firewall_key(device_raw)
+    return key
+
+
+def canonical_firewall_key_import(device_raw: str | None) -> str:
+    """Canonical key for import: no HA logic; import firewalls are always single-node. Use only in import path."""
+    if not device_raw:
+        return ""
+    return device_raw.strip()
