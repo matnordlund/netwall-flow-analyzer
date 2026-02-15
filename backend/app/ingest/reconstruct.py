@@ -582,6 +582,29 @@ def normalize_to_models(parsed: ParsedRecord, raw_text: str) -> Tuple[RawLog, Op
 # Accepted id prefixes: CONN (0060, 60), DEVICE (0890, 89). InControl may send 600004, 890001.
 _ACCEPTED_ID_PREFIXES = ("0060", "60", "0890", "89")
 
+# Only these CONN (0060) ids are imported; all others (e.g. 6000051 RULE) are filtered. Applied for both import and syslog.
+_CONN_ACCEPTED_IDS = frozenset({
+    "00600001", "00600002", "00600004", "00600005",
+    "00600032", "00600033", "00600035",
+})
+
+
+def _normalize_conn_id(rec_id: str) -> str:
+    """Normalize CONN id to 8-digit form for allowlist check (e.g. 600004 -> 00600004)."""
+    s = (rec_id or "").strip()
+    if not s:
+        return ""
+    if s.isdigit():
+        return s.zfill(8)
+    return s
+
+
+def _is_accepted_conn_id(rec_id: str) -> bool:
+    """True if rec_id is a CONN id that is in the allowlist."""
+    if not rec_id or not (rec_id.startswith("0060") or rec_id.startswith("60")):
+        return False
+    return _normalize_conn_id(rec_id) in _CONN_ACCEPTED_IDS
+
 
 def _upsert_device_identification(
     db: Session,
@@ -880,6 +903,13 @@ class SyslogIngestor:
 
                 # Filter: only keep CONN (0060) and DEVICE (0890)
                 if rec_id and not any(rec_id.startswith(p) for p in _ACCEPTED_ID_PREFIXES):
+                    ingest_stats.records_filtered_id += 1
+                    if self.upload_collector is not None:
+                        self.upload_collector.filtered_id += 1
+                    continue
+
+                # CONN (0060/60): only allowlisted ids (import and syslog)
+                if (rec_id.startswith("0060") or rec_id.startswith("60")) and not _is_accepted_conn_id(rec_id):
                     ingest_stats.records_filtered_id += 1
                     if self.upload_collector is not None:
                         self.upload_collector.filtered_id += 1
