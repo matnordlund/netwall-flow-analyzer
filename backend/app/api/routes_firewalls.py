@@ -283,7 +283,7 @@ def _run_purge_firewall(session_factory, job_id: str, device_key: str) -> None:
             r = db.execute(delete(Flow).where(Flow.device.in_(members)))
             counts["flows_deleted"] = r.rowcount
             db.commit()
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise
         try:
@@ -291,56 +291,56 @@ def _run_purge_firewall(session_factory, job_id: str, device_key: str) -> None:
             r = db.execute(delete(Endpoint).where(Endpoint.device.in_(members)))
             counts["endpoints_deleted"] = r.rowcount
             db.commit()
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise
         try:
             r = db.execute(delete(Event).where(Event.device.in_(members)))
             counts["events_deleted"] = r.rowcount
             db.commit()
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise
         try:
             r = db.execute(delete(RawLog).where(RawLog.device.in_(members)))
             counts["raw_logs_deleted"] = r.rowcount
             db.commit()
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise
         try:
             r = db.execute(delete(UnclassifiedEndpoint).where(UnclassifiedEndpoint.device.in_(members)))
             counts["unclassified_endpoints_deleted"] = r.rowcount
             db.commit()
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise
         try:
             r = db.execute(delete(Classification).where(Classification.device.in_(members)))
             counts["classifications_deleted"] = r.rowcount
             db.commit()
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise
         try:
             r = db.execute(delete(DeviceIdentification).where(DeviceIdentification.firewall_device.in_(members)))
             counts["device_identifications_deleted"] = r.rowcount
             db.commit()
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise
         try:
             r = db.execute(delete(DeviceOverride).where(DeviceOverride.firewall_device.in_(members)))
             counts["device_overrides_deleted"] = r.rowcount
             db.commit()
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise
         try:
             r = db.execute(delete(RouterMac).where(RouterMac.device.in_(members)))
             counts["router_macs_deleted"] = r.rowcount
             db.commit()
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise
         try:
@@ -348,14 +348,14 @@ def _run_purge_firewall(session_factory, job_id: str, device_key: str) -> None:
             r2 = db.execute(delete(FirewallOverride).where(FirewallOverride.device_key == canonical_override_key))
             counts["firewall_overrides_deleted"] = r.rowcount + r2.rowcount
             db.commit()
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise
         try:
             r = db.execute(delete(FirewallInventory).where(FirewallInventory.device_key == device_key))
             counts["firewall_inventory_deleted"] = r.rowcount
             db.commit()
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise
 

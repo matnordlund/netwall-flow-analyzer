@@ -9,12 +9,12 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
-from ..storage.models import AppSetting, Event, RawLog
+from ..storage.models import Event, RawLog
 from ..storage.settings import get_all_settings, get_setting, set_setting
 
 logger = logging.getLogger("netwall.settings")

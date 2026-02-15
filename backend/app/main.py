@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-from contextlib import asynccontextmanager
 from typing import Optional
 
 import uvicorn

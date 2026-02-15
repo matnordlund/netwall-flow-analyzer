@@ -7,7 +7,6 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 
-from ..api.device_resolve import get_device_display_label
 from ..api.routes_zones import HA_MASTER_SUFFIX, HA_SLAVE_SUFFIX
 from ..ingest.job_processor import process_ingest_job
 from ..ingest.stats import ingest_stats

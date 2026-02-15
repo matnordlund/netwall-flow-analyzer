@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session

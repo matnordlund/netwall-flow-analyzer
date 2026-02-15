@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.exc import MultipleResultsFound
 
 from ..api.device_resolve import get_device_display_label

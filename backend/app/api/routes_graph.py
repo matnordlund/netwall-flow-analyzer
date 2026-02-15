@@ -240,9 +240,11 @@ def _build_source_breakdown_per_dest(
             result[dst_ep_id] = []
         result[dst_ep_id].append(entry)
 
+    def _total_key(e: dict) -> int:
+        return sum(s["count_total"] for s in e["services"])
+
     for dst_ep_id in result:
-        total_key = lambda e: sum(s["count_total"] for s in e["services"])
-        result[dst_ep_id].sort(key=total_key, reverse=True)
+        result[dst_ep_id].sort(key=_total_key, reverse=True)
         result[dst_ep_id] = result[dst_ep_id][:TOP_SOURCES_N]
 
     return result
@@ -885,8 +887,10 @@ def _get_graph_from_events(
         # 2) Port nodes: svcport:proto:port (count + dest_ip_count); sort by port asc, then TCP before UDP
         def _proto_rank(p: str) -> int:
             s = (p or "").strip().upper()
-            if s == "TCP": return 0
-            if s == "UDP": return 1
+            if s == "TCP":
+                return 0
+            if s == "UDP":
+                return 1
             return 2
 
         service_port_nodes: List[Dict[str, Any]] = []

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query, Request
-from sqlalchemy import case, cast, func, literal, or_, select, union, union_all, Integer as SAInteger
+from sqlalchemy import case, func, or_, select, union, union_all
 from sqlalchemy.orm import Session
 
 from ..api.device_resolve import resolve_device

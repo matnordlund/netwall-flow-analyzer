@@ -6,17 +6,14 @@ from typing import Optional
 from sqlalchemy import (
     JSON,
     Boolean,
-    CheckConstraint,
     DateTime,
-    Enum,
-    Float,
     ForeignKey,
     Integer,
     String,
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):

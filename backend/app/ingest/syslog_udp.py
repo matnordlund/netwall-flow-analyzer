@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 
 from .stats import ingest_stats, SAMPLE_RAW_LINE_MAX
 

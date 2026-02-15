@@ -42,9 +42,11 @@ def upsert_firewall_syslog(db: Session, device_key: str, ts_utc: datetime) -> No
         ))
     else:
         row.source_syslog = 1
-        if row.first_seen_ts is None or ts_utc < row.first_seen_ts:
+        first = _ensure_utc(row.first_seen_ts)
+        last = _ensure_utc(row.last_seen_ts)
+        if first is None or ts_utc < first:
             row.first_seen_ts = ts_utc
-        if row.last_seen_ts is None or ts_utc > row.last_seen_ts:
+        if last is None or ts_utc > last:
             row.last_seen_ts = ts_utc
         row.updated_at = now
 
@@ -81,11 +83,13 @@ def upsert_firewall_import(
     else:
         row.source_import = 1
         row.last_import_ts = now
+        first = _ensure_utc(row.first_seen_ts)
+        last = _ensure_utc(row.last_seen_ts)
         if first_ts is not None:
-            if row.first_seen_ts is None or first_ts < row.first_seen_ts:
+            if first is None or first_ts < first:
                 row.first_seen_ts = first_ts
         if last_ts is not None:
-            if row.last_seen_ts is None or last_ts > row.last_seen_ts:
+            if last is None or last_ts > last:
                 row.last_seen_ts = last_ts
         row.updated_at = now
 

@@ -3,29 +3,13 @@
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
-from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from ..api.device_resolve import resolve_device
-from ..storage.models import (
-    Classification,
-    DeviceIdentification,
-    DeviceOverride,
-    Endpoint,
-    Event,
-    FirewallOverride,
-    Flow,
-    IngestJob,
-    MaintenanceJob,
-    RawLog,
-    RouterMac,
-    UnclassifiedEndpoint,
-)
+from ..storage.models import MaintenanceJob
 
 router = APIRouter(tags=["maintenance"])
 logger = logging.getLogger(__name__)
