@@ -3439,36 +3439,67 @@ function SortableHeaderStr({
 }
 
 /* ── Firewall source badges ── */
-function FirewallSourceBadges({ source }: { source?: { syslog: boolean; import: boolean; last_import_ts?: string | null } }) {
-  if (!source) return <span className="text-muted-foreground text-xs">—</span>;
-  const fromSyslog = !!source.syslog;
-  const fromImport = !!source.import;
-  const importOnly = fromImport && !fromSyslog;
+type ActiveImportJob = { job_id: string; filename?: string; progress?: number; status?: string };
+function FirewallSourceBadges({
+  source,
+  isImporting,
+  activeImportJobs,
+  onOpenImportStatus,
+  onOpenFirewallDetails,
+}: {
+  source?: { syslog: boolean; import: boolean; last_import_ts?: string | null };
+  isImporting?: boolean;
+  activeImportJobs?: ActiveImportJob[];
+  onOpenImportStatus?: (jobId: string) => void;
+  onOpenFirewallDetails?: () => void;
+}) {
+  const firstJobId = activeImportJobs?.[0]?.job_id;
+  const progressPct = activeImportJobs?.[0]?.progress != null ? Math.round(activeImportJobs[0].progress * 100) : null;
   return (
     <span className="flex flex-wrap items-center gap-1.5">
-      {fromSyslog && (
-        <span className="inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium bg-primary/15 text-primary border border-primary/30">
-          SYSLOG
-        </span>
-      )}
-      {fromImport && (
-        <span
-          className={cn(
-            'inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium border',
-            importOnly
-              ? 'bg-violet-500/15 text-violet-700 dark:text-violet-300 border-violet-500/40'
-              : 'bg-muted text-muted-foreground border-border',
-          )}
+      {isImporting && (firstJobId || onOpenFirewallDetails) && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (onOpenFirewallDetails) onOpenFirewallDetails();
+            else if (firstJobId) onOpenImportStatus?.(firstJobId);
+          }}
+          className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/40 hover:bg-amber-500/30 transition-colors"
+          title="View import progress"
         >
-          IMPORTED
-        </span>
+          <span className="animate-pulse">PROCESSING</span>
+          {progressPct != null && <span className="opacity-80">({progressPct}%)</span>}
+        </button>
       )}
-      {!fromSyslog && !fromImport && <span className="text-muted-foreground text-xs">—</span>}
-      {importOnly && (
-        <span className="text-[10px] text-muted-foreground italic" title="Not removed by log retention">
-          Retention excluded
-        </span>
+      {source && (
+        <>
+          {source.syslog && (
+            <span className="inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium bg-primary/15 text-primary border border-primary/30">
+              SYSLOG
+            </span>
+          )}
+          {source.import && (
+            <span
+              className={cn(
+                'inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium border',
+                source.import && !source.syslog
+                  ? 'bg-violet-500/15 text-violet-700 dark:text-violet-300 border-violet-500/40'
+                  : 'bg-muted text-muted-foreground border-border',
+              )}
+            >
+              IMPORTED
+            </span>
+          )}
+          {!source.syslog && !source.import && !isImporting && <span className="text-muted-foreground text-xs">—</span>}
+          {source.import && !source.syslog && (
+            <span className="text-[10px] text-muted-foreground italic" title="Not removed by log retention">
+              Retention excluded
+            </span>
+          )}
+        </>
       )}
+      {!source && !isImporting && <span className="text-muted-foreground text-xs">—</span>}
     </span>
   );
 }
@@ -3482,18 +3513,45 @@ type FirewallRow = {
   latest_log: string | null;
   event_count: number;
   source?: { syslog: boolean; import: boolean; last_import_ts?: string | null };
+  is_importing?: boolean;
+  active_import_jobs?: Array<{ job_id: string; filename?: string; progress?: number; status?: string }>;
 };
 
-function FirewallInventoryPage() {
+function FirewallInventoryPage({ onOpenImportStatus }: { onOpenImportStatus?: (jobId: string) => void }) {
   const queryClient = useQueryClient();
-  const { data: list = [], isFetching } = useQuery({
+  const { data: listRaw, isFetching } = useQuery({
     queryKey: ['firewalls'],
     queryFn: async () => {
       const res = await fetch(`${API}/firewalls`);
       if (!res.ok) throw new Error('Failed to load firewalls');
       return res.json();
     },
+    refetchInterval: 5000,
   });
+  const { data: activeJobsRaw } = useQuery({
+    queryKey: ['ingest-jobs', 'active'],
+    queryFn: async () => {
+      const res = await fetch(`${API}/ingest/jobs?state=queued,running&limit=50`);
+      if (!res.ok) return [];
+      const json = await res.json();
+      return (json?.jobs ?? []) as Array<{
+        job_id: string;
+        filename?: string | null;
+        status?: string;
+        phase?: string;
+        progress?: number;
+        lines_processed?: number;
+        lines_total?: number;
+        events_inserted?: number;
+        discarded?: number;
+        created_at?: string | null;
+        device_key?: string | null;
+      }>;
+    },
+    refetchInterval: 2000,
+  });
+  const pendingImportJobs = (activeJobsRaw ?? []).filter((j) => !j.device_key);
+  const list = Array.isArray(listRaw) ? listRaw : (listRaw as { firewalls?: FirewallRow[] })?.firewalls ?? [];
   const [searchInput, setSearchInput] = useState('');
   const debouncedSearch = useDebounce(searchInput, 250);
   const [sortBy, setSortBy] = useState<string>('latest_log');
@@ -3591,6 +3649,42 @@ function FirewallInventoryPage() {
           </div>
         </div>
       </div>
+      {pendingImportJobs.length > 0 && (
+        <div className="mx-3 mt-3 rounded-2xl border border-border bg-card p-4">
+          <h3 className="text-sm font-medium text-foreground mb-2">Pending imports (firewall not detected yet)</h3>
+          <ul className="space-y-3">
+            {pendingImportJobs.map((j) => {
+              const pct = j.progress != null ? Math.round(j.progress * 100) : null;
+              return (
+                <li key={j.job_id} className="rounded-lg border border-border bg-muted/20 p-2.5 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-foreground truncate max-w-[240px]" title={j.filename ?? j.job_id}>{j.filename ?? j.job_id}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {j.created_at ? new Date(j.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
+                    </span>
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-700 dark:text-amber-300">{j.status ?? 'queued'}</span>
+                    {j.phase && <span className="text-xs text-muted-foreground">{j.phase}</span>}
+                  </div>
+                  {(j.status === 'running' && (pct != null || (j.lines_processed != null && j.lines_processed > 0))) && (
+                    <div className="flex items-center gap-2 mt-1.5">
+                      <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden min-w-[80px]">
+                        <div
+                          className="h-full bg-primary transition-all duration-200"
+                          style={{ width: `${pct != null ? Math.min(100, Math.max(0, pct)) : 0}%` }}
+                        />
+                      </div>
+                      <span className="text-xs text-muted-foreground shrink-0">
+                        {pct != null ? `${pct}%` : `${j.lines_processed ?? 0} lines`}
+                      </span>
+                    </div>
+                  )}
+                  {j.status === 'queued' && <div className="mt-1 text-xs text-muted-foreground">Queued — will start when the current job finishes</div>}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
       <div className="flex-1 flex flex-col mx-3 mt-3 overflow-hidden">
         <div className="flex-1 overflow-auto rounded-2xl border border-border bg-card">
           <table className="w-full text-sm border-collapse">
@@ -3617,7 +3711,13 @@ function FirewallInventoryPage() {
                     {Array.isArray(r.members) && r.members.length > 0 ? r.members.join(', ') : '—'}
                   </td>
                   <td className="px-3 py-2">
-                    <FirewallSourceBadges source={r.source} />
+                    <FirewallSourceBadges
+                      source={r.source}
+                      isImporting={r.is_importing}
+                      activeImportJobs={r.active_import_jobs}
+                      onOpenImportStatus={onOpenImportStatus}
+                      onOpenFirewallDetails={() => setSelected(r)}
+                    />
                   </td>
                   <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{fmtTs(r.oldest_log)}</td>
                   <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{fmtTs(r.latest_log)}</td>
@@ -3708,6 +3808,26 @@ function FirewallInventoryPage() {
   );
 }
 
+type FirewallImportJob = {
+  job_id: string;
+  filename?: string | null;
+  status: string;
+  phase?: string;
+  progress?: number;
+  lines_processed?: number;
+  lines_total?: number;
+  parse_ok?: number;
+  parse_err?: number;
+  raw_logs_inserted?: number;
+  events_inserted?: number;
+  time_min?: string | null;
+  time_max?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error_message?: string | null;
+};
+
 function FirewallOverrideModal({
   firewall,
   onClose,
@@ -3723,6 +3843,22 @@ function FirewallOverrideModal({
   const [overrideData, setOverrideData] = useState<{ display_name: string | null; comment: string | null } | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const { data: importJobs = [], refetch: refetchImportJobs } = useQuery({
+    queryKey: ['firewalls', firewall.device_key, 'import-jobs'],
+    queryFn: async () => {
+      const res = await fetch(`${API}/firewalls/${encodeURIComponent(firewall.device_key)}/import-jobs`);
+      if (!res.ok) return [];
+      const json = await res.json();
+      return (Array.isArray(json) ? json : json?.jobs ?? []) as FirewallImportJob[];
+    },
+  });
+  const handleCancelImport = React.useCallback(async (jobId: string) => {
+    try {
+      await fetch(`${API}/ingest/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+      refetchImportJobs();
+    } catch (_) {}
+  }, [refetchImportJobs]);
 
   React.useEffect(() => {
     setDisplayName(firewall.display_name || '');
@@ -3823,6 +3959,66 @@ function FirewallOverrideModal({
                   rows={3}
                   className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/50 resize-y"
                 />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Import jobs</label>
+                {importJobs.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No import jobs for this firewall.</p>
+                ) : (
+                  <ul className="space-y-2 max-h-48 overflow-y-auto">
+                    {importJobs.map((j) => (
+                      <li key={j.job_id} className="rounded-lg border border-border bg-muted/20 p-2 text-sm">
+                        <div className="flex justify-between items-start gap-2">
+                          <span className="font-medium text-foreground truncate">{j.filename ?? j.job_id}</span>
+                          <span className="text-xs text-muted-foreground shrink-0">{j.status}</span>
+                        </div>
+                        {j.created_at && (
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {new Date(j.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                          </p>
+                        )}
+                        {(j.status === 'running' || j.status === 'queued') && (
+                          <>
+                            {j.status === 'running' && j.progress != null && (
+                              <div className="flex items-center gap-2 mt-1">
+                                <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
+                                  <div className="h-full bg-primary" style={{ width: `${Math.round((j.progress ?? 0) * 100)}%` }} />
+                                </div>
+                                <span className="text-xs">{Math.round((j.progress ?? 0) * 100)}%</span>
+                              </div>
+                            )}
+                            <div className="flex flex-wrap gap-2 mt-1 text-xs text-muted-foreground">
+                              {(j.lines_processed ?? 0) > 0 && <span>Lines: {j.lines_processed}</span>}
+                              {(j.raw_logs_inserted ?? 0) > 0 && <span>Inserted: {j.raw_logs_inserted}</span>}
+                              {(j.parse_err ?? 0) > 0 && <span>Parse err: {j.parse_err}</span>}
+                            </div>
+                            {(j.time_min || j.time_max) && (
+                              <p className="text-xs text-muted-foreground mt-0.5">
+                                {j.time_min ?? '…'} → {j.time_max ?? '…'}
+                              </p>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleCancelImport(j.job_id)}
+                              className="mt-2 h-7 px-2 rounded text-xs font-medium border border-destructive/50 text-destructive hover:bg-destructive/10"
+                            >
+                              Cancel import
+                            </button>
+                          </>
+                        )}
+                        {j.status === 'done' && (
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {j.raw_logs_inserted ?? 0} raw logs, {j.events_inserted ?? 0} events
+                            {j.time_min && j.time_max ? ` · ${j.time_min} → ${j.time_max}` : ''}
+                          </p>
+                        )}
+                        {j.status === 'error' && j.error_message && (
+                          <p className="text-xs text-destructive mt-0.5 truncate" title={j.error_message}>{j.error_message}</p>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
               {error && <p className="text-sm text-destructive">{error}</p>}
             </>
@@ -4678,10 +4874,14 @@ function isoToDatetimeLocal(iso: string): string {
 /* ── Job status (polling response) ── */
 type JobStatus = {
   job_id: string;
-  status: 'uploading' | 'processing' | 'done' | 'error';
+  status: 'queued' | 'uploading' | 'running' | 'processing' | 'done' | 'error' | 'canceled';
+  state?: string;
+  phase?: string;
+  progress?: number;
   filename?: string;
   bytes_total?: number;
   bytes_received?: number;
+  bytes_processed?: number;
   lines_total?: number;
   lines_processed?: number;
   parse_ok?: number;
@@ -4696,6 +4896,7 @@ type JobStatus = {
   device_detected?: string | null;
   device_key?: string | null;
   device_display?: string | null;
+  firewall_display?: string | null;
   error_message?: string | null;
   error_type?: string | null;
   error_stage?: string | null;
@@ -4725,9 +4926,9 @@ function ImportErrorBlock({
   const jobId = jobStatus?.job_id ?? null;
   const stage = jobStatus?.error_stage ?? 'processing';
   const errorType = jobStatus?.error_type ?? 'Error';
-  const message = jobStatus?.error_message ?? 'Import failed.';
+  const message = jobStatus?.error_message?.trim() || 'Import failed. No error details were recorded.';
   const hint = getErrorHint(jobStatus?.error_type);
-  const isGeneric = (errorType === 'Error' && message === 'Import failed.') || !jobStatus?.error_type;
+  const isGeneric = (errorType === 'Error' && !(jobStatus?.error_message?.trim())) || !jobStatus?.error_type;
   const copyLines = [
     jobId ? `Job ID: ${jobId}` : null,
     `Stage: ${stage}`,
@@ -4826,6 +5027,7 @@ function UploadStatusModal({
   fileSize,
   jobStatus,
   summary,
+  pollReconnecting,
   onClose,
   onApplyToDashboard,
   onRefresh,
@@ -4834,11 +5036,12 @@ function UploadStatusModal({
   onToast,
 }: {
   open: boolean;
-  phase: 'uploading' | 'processing' | 'done' | 'error';
+  phase: 'uploading' | 'upload_complete' | 'processing' | 'done' | 'error';
   uploadPct: number;
   fileSize?: number | null;
   jobStatus: JobStatus | null;
   summary: ImportSummary | null;
+  pollReconnecting?: boolean;
   onClose: () => void;
   onApplyToDashboard?: (deviceId: string, deviceLabel: string, timeMin?: string, timeMax?: string) => void;
   onRefresh?: () => Promise<void>;
@@ -4898,12 +5101,21 @@ function UploadStatusModal({
         <div>
           <h2 id="upload-status-title" className="text-lg font-semibold text-foreground">
             {phase === 'uploading' && 'Uploading…'}
+            {phase === 'upload_complete' && 'Upload complete'}
             {phase === 'processing' && 'Processing…'}
             {phase === 'done' && 'Import complete'}
             {phase === 'error' && 'Import failed'}
           </h2>
           <p className="text-sm text-muted-foreground mt-0.5">InControl syslog upload</p>
         </div>
+
+        {phase === 'upload_complete' && (
+          <div className="space-y-2 text-sm">
+            <p className="text-foreground">Import has been queued for processing.</p>
+            {summary?.filename && <p className="text-muted-foreground truncate">File: {summary.filename}</p>}
+            {jobStatus?.job_id && <p className="text-muted-foreground font-mono text-xs break-all">Job: {jobStatus.job_id}</p>}
+          </div>
+        )}
 
         {phase === 'uploading' && (
           <div className="space-y-2">
@@ -4942,8 +5154,14 @@ function UploadStatusModal({
               <>
                 <div className="flex justify-between text-xs text-muted-foreground">
                   <span>Processed: {jobStatus.lines_processed ?? 0} lines</span>
-                  {(jobStatus.lines_total ?? 0) > 0 && (
-                    <span>{Math.round(((jobStatus.lines_processed ?? 0) / jobStatus.lines_total!) * 100)}%</span>
+                  {((jobStatus.lines_total ?? 0) > 0 || jobStatus.progress != null) && (
+                    <span>
+                      {jobStatus.lines_total != null && jobStatus.lines_total > 0
+                        ? Math.round(((jobStatus.lines_processed ?? 0) / jobStatus.lines_total) * 100)
+                        : jobStatus.progress != null
+                          ? Math.round(jobStatus.progress * 100)
+                          : 0}%
+                    </span>
                   )}
                 </div>
                 <div className="h-2 rounded-full bg-muted overflow-hidden">
@@ -4951,6 +5169,11 @@ function UploadStatusModal({
                     <div
                       className="h-full bg-primary transition-all duration-200"
                       style={{ width: `${Math.min(100, ((jobStatus.lines_processed ?? 0) / jobStatus.lines_total!) * 100)}%` }}
+                    />
+                  ) : jobStatus.progress != null ? (
+                    <div
+                      className="h-full bg-primary transition-all duration-200"
+                      style={{ width: `${Math.min(100, jobStatus.progress * 100)}%` }}
                     />
                   ) : (
                     <div className="h-full w-1/3 bg-primary animate-pulse rounded-full" style={{ animationDirection: 'alternate' }} />
@@ -4961,8 +5184,20 @@ function UploadStatusModal({
           </div>
         )}
 
+        {(phase === 'processing' || phase === 'uploading') && pollReconnecting && (
+          <p className="text-xs text-amber-600 dark:text-amber-400 bg-amber-500/10 rounded-md px-2 py-1.5">
+            Still importing… reconnecting.
+          </p>
+        )}
         {phase === 'error' && (
-          <ImportErrorBlock jobStatus={jobStatus} onClose={onClose} onRefresh={onRefresh} />
+          <>
+            {jobStatus?.error_message && (
+              <p className="text-xs text-muted-foreground bg-muted/50 rounded-md px-2 py-1.5">
+                Upload succeeded but processing failed. See details below.
+              </p>
+            )}
+            <ImportErrorBlock jobStatus={jobStatus} onClose={onClose} onRefresh={onRefresh} />
+          </>
         )}
 
         {(phase === 'done' && (summary || jobStatus)) && (
@@ -5013,6 +5248,167 @@ function UploadStatusModal({
   );
 }
 
+/* ── Import queue badge + popover ── */
+type IngestJobRow = {
+  job_id: string;
+  status: string;
+  phase?: string;
+  progress?: number;
+  filename?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error_message?: string | null;
+};
+function ImportQueueBadgeAndPopover({
+  onOpenUploadModal,
+  onToast,
+}: {
+  onOpenUploadModal: () => void;
+  onToast?: (msg: string) => void;
+}) {
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['ingest-jobs', popoverOpen],
+    queryFn: async () => {
+      const res = await fetch(`${API}/ingest/jobs?state=queued,running,done,error,canceled&limit=50`);
+      if (!res.ok) throw new Error('Failed to load jobs');
+      const json = await res.json();
+      return (json?.jobs ?? []) as IngestJobRow[];
+    },
+    refetchInterval: popoverOpen ? 2000 : 8000,
+    enabled: true,
+  });
+  const jobs = data ?? [];
+  const activeCount = jobs.filter((j) => j.status === 'queued' || j.status === 'running').length;
+
+  const handleCancel = React.useCallback(
+    async (jobId: string) => {
+      try {
+        const res = await fetch(`${API}/ingest/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          onToast?.(data?.detail ?? res.statusText ?? 'Cancel failed');
+          return;
+        }
+        refetch();
+      } catch {
+        onToast?.('Request failed');
+      }
+    },
+    [refetch, onToast]
+  );
+
+  const handleDelete = React.useCallback(
+    async (jobId: string) => {
+      try {
+        const res = await fetch(`${API}/ingest/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          onToast?.(data?.detail ?? res.statusText ?? 'Delete failed');
+          return;
+        }
+        refetch();
+      } catch {
+        onToast?.('Request failed');
+      }
+    },
+    [refetch, onToast]
+  );
+
+  const sorted = React.useMemo(() => {
+    const order = (a: IngestJobRow, b: IngestJobRow) => {
+      const rank = (s: string) => (s === 'running' ? 0 : s === 'queued' ? 1 : 2);
+      return rank(a.status) - rank(b.status);
+    };
+    return [...jobs].sort(order);
+  }, [jobs]);
+
+  return (
+    <div className="relative flex items-center">
+      {activeCount > 0 && (
+        <button
+          type="button"
+          onClick={() => setPopoverOpen((o) => !o)}
+          className="h-8 min-w-[28px] px-1.5 rounded-md text-xs font-medium border border-border bg-muted/60 text-foreground hover:bg-muted transition-colors flex items-center justify-center"
+          title="Import queue"
+        >
+          {activeCount}
+        </button>
+      )}
+      {popoverOpen && (
+        <>
+          <div className="fixed inset-0 z-40" aria-hidden onClick={() => setPopoverOpen(false)} />
+          <div className="absolute right-0 top-full mt-1 z-50 w-[360px] max-h-[320px] overflow-auto rounded-lg border border-border bg-card shadow-xl p-2">
+            <div className="flex items-center justify-between mb-2 px-1">
+              <span className="text-sm font-medium text-foreground">Import queue</span>
+              <button type="button" onClick={() => setPopoverOpen(false)} className="p-1 rounded hover:bg-muted">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {isLoading && jobs.length === 0 ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
+                <Loader2 className="w-4 h-4 animate-spin" /> Loading…
+              </div>
+            ) : sorted.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-4">No import jobs.</p>
+            ) : (
+              <ul className="space-y-1">
+                {sorted.map((j) => (
+                  <li
+                    key={j.job_id}
+                    className="flex flex-col gap-1 rounded-md border border-border bg-muted/30 p-2 text-sm"
+                  >
+                    <div className="flex justify-between items-start gap-2">
+                      <span className="font-medium text-foreground truncate flex-1" title={j.filename ?? j.job_id}>
+                        {j.filename ?? j.job_id}
+                      </span>
+                      <span className="text-xs text-muted-foreground shrink-0">{j.status}</span>
+                    </div>
+                    {j.created_at && (
+                      <div className="text-xs text-muted-foreground">
+                        {new Date(j.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                      </div>
+                    )}
+                    {(j.status === 'running' && j.progress != null) && (
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
+                          <div className="h-full bg-primary" style={{ width: `${Math.round((j.progress ?? 0) * 100)}%` }} />
+                        </div>
+                        <span className="text-xs">{Math.round((j.progress ?? 0) * 100)}%</span>
+                      </div>
+                    )}
+                    <div className="flex gap-1 mt-1">
+                      {(j.status === 'queued' || j.status === 'running') && (
+                        <button
+                          type="button"
+                          onClick={() => handleCancel(j.job_id)}
+                          className="h-6 px-2 rounded text-xs font-medium border border-border bg-background hover:bg-muted"
+                        >
+                          Cancel
+                        </button>
+                      )}
+                      {['done', 'error', 'canceled'].includes(j.status) && (
+                        <button
+                          type="button"
+                          onClick={() => handleDelete(j.job_id)}
+                          className="h-6 px-2 rounded text-xs font-medium border border-destructive/50 text-destructive hover:bg-destructive/10"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /* ── Upload syslog button (header) ── */
 function UploadSyslogButton({
   onToast,
@@ -5026,7 +5422,7 @@ function UploadSyslogButton({
   onToast?: (msg: string) => void;
   onUploadStart?: (fileSize?: number) => void;
   onUploadProgress?: (pct: number) => void;
-  onUploadJobCreated?: (jobId: string) => void;
+  onUploadJobCreated?: (jobId: string, filename?: string | null, sizeBytes?: number) => void;
   onUploadError?: (message: string) => void;
   device?: string;
   isUploading?: boolean;
@@ -5057,7 +5453,7 @@ function UploadSyslogButton({
           try {
             const data = JSON.parse(xhr.responseText || '{}');
             if (data?.ok === true && data?.job_id) {
-              onUploadJobCreated?.(data.job_id);
+              onUploadJobCreated?.(data.job_id, data?.filename ?? null, data?.size_bytes);
             } else {
               onUploadError?.('Invalid response');
             }
@@ -5112,7 +5508,7 @@ function App() {
   const [page, setPage] = useState<'dashboard' | 'endpoints' | 'firewalls' | 'settings'>('dashboard');
   const [appToast, setAppToast] = useState<string | null>(null);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
-  const [uploadPhase, setUploadPhase] = useState<'uploading' | 'processing' | 'done' | 'error'>('error'); // 'error' = idle (no upload in progress)
+  const [uploadPhase, setUploadPhase] = useState<'uploading' | 'upload_complete' | 'processing' | 'done' | 'error'>('error'); // 'error' = idle
   const [uploadPct, setUploadPct] = useState(0);
   const [jobId, setJobId] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
@@ -5132,7 +5528,7 @@ function App() {
     setUploadFileSize(null);
   }, []);
 
-  const isUploading = uploadPhase === 'uploading' || uploadPhase === 'processing';
+  const isUploading = uploadPhase === 'uploading';
 
   const handleUploadStart = React.useCallback((fileSize?: number) => {
     setUploadModalOpen(true);
@@ -5148,9 +5544,11 @@ function App() {
     setUploadPct(pct);
   }, []);
 
-  const handleUploadJobCreated = React.useCallback((id: string) => {
+  const handleUploadJobCreated = React.useCallback((id: string, filename?: string | null, _sizeBytes?: number) => {
     setJobId(id);
-    setUploadPhase('processing');
+    setJobStatus({ job_id: id, status: 'queued', filename: filename ?? undefined } as JobStatus);
+    setUploadSummary(filename ? { ok: true, filename } as ImportSummary : null);
+    setUploadPhase('upload_complete');
     setUploadPct(100);
   }, []);
 
@@ -5159,55 +5557,8 @@ function App() {
     setJobStatus({ status: 'error', error_message: message, job_id: '' } as JobStatus);
   }, []);
 
-  React.useEffect(() => {
-    if (!jobId) return;
-    const POLL_MS = 800;
-    const STUCK_MS = 5 * 60 * 1000; // 5 min
-    const startedAt = Date.now();
-    const interval = setInterval(async () => {
-      try {
-        if (Date.now() - startedAt > STUCK_MS) {
-          setUploadPhase('error');
-          setJobStatus((prev) => ({ ...prev, status: 'error', error_message: 'Processing timed out. The job may have failed on the server.', job_id: jobId } as JobStatus));
-          setJobId(null);
-          return;
-        }
-        const res = await fetch(`${API}/ingest/upload/status?job_id=${encodeURIComponent(jobId)}`);
-        if (res.status === 404) {
-          setUploadPhase('error');
-          setJobStatus({ status: 'error', error_message: 'Job not found.', job_id: jobId } as JobStatus);
-          setJobId(null);
-          return;
-        }
-        if (!res.ok) return;
-        const data: JobStatus = await res.json();
-        setJobStatus(data);
-        if (data.status === 'done') {
-          setUploadSummary({
-            ok: true,
-            filename: data.filename,
-            device_detected: data.device_detected ?? undefined,
-            device_key: data.device_key ?? undefined,
-            device_display: data.device_display ?? undefined,
-            lines_total: data.lines_processed ?? data.lines_total,
-            raw_logs_inserted: data.raw_logs_inserted,
-            events_inserted: data.events_inserted,
-            parse_ok: data.parse_ok,
-            parse_err: data.parse_err,
-            filtered_id: data.filtered_id,
-            time_min: data.time_min ?? undefined,
-            time_max: data.time_max ?? undefined,
-          });
-          setUploadPhase('done');
-          setJobId(null);
-        } else if (data.status === 'error') {
-          setUploadPhase('error');
-          setJobId(null);
-        }
-      } catch (_) {}
-    }, POLL_MS);
-    return () => clearInterval(interval);
-  }, [jobId]);
+  const [pollReconnecting, setPollReconnecting] = React.useState(false);
+  // No polling in upload modal: import runs in background; user sees status via queue popover or firewall details.
 
   const handleUploadModalClose = React.useCallback(() => {
     setUploadModalOpen(false);
@@ -5265,30 +5616,22 @@ function App() {
               ))}
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            {isUploading ? (
-              <button
-                type="button"
-                onClick={() => setUploadModalOpen(true)}
-                title="Open import status"
-                className="h-8 px-3 rounded-md text-sm font-medium border border-border bg-background text-foreground hover:bg-muted/60 transition-colors flex items-center gap-2 flex-shrink-0 focus:outline-none focus:ring-2 focus:ring-ring"
-              >
-                <Loader2 className="w-4 h-4 flex-shrink-0 animate-spin" />
-                <span className="hidden md:inline">Import status</span>
-              </button>
-            ) : (
-              <UploadSyslogButton
-                onToast={(msg) => {
-                  setAppToast(msg);
-                  setTimeout(() => setAppToast(null), 4000);
-                }}
-                onUploadStart={handleUploadStart}
-                onUploadProgress={handleUploadProgress}
-                onUploadJobCreated={handleUploadJobCreated}
-                onUploadError={handleUploadError}
-                isUploading={false}
-              />
-            )}
+          <div className="flex items-center gap-2">
+            <ImportQueueBadgeAndPopover
+              onOpenUploadModal={() => setUploadModalOpen(true)}
+              onToast={(msg) => { setAppToast(msg); setTimeout(() => setAppToast(null), 4000); }}
+            />
+            <UploadSyslogButton
+              onToast={(msg) => {
+                setAppToast(msg);
+                setTimeout(() => setAppToast(null), 4000);
+              }}
+              onUploadStart={handleUploadStart}
+              onUploadProgress={handleUploadProgress}
+              onUploadJobCreated={handleUploadJobCreated}
+              onUploadError={handleUploadError}
+              isUploading={isUploading}
+            />
             <HeaderStatsStrip />
             <button
               type="button"
@@ -5314,7 +5657,16 @@ function App() {
           />
         )}
         {page === 'endpoints' && <EndpointsPage />}
-        {page === 'firewalls' && <FirewallInventoryPage />}
+        {page === 'firewalls' && (
+          <FirewallInventoryPage
+            onOpenImportStatus={(jobId) => {
+              setJobId(jobId);
+              setUploadPhase('processing');
+              setUploadModalOpen(true);
+              setJobStatus(null);
+            }}
+          />
+        )}
         {page === 'settings' && <SettingsPage onBack={() => setPage('dashboard')} />}
         <UploadStatusModal
           open={uploadModalOpen}
@@ -5323,6 +5675,7 @@ function App() {
           fileSize={uploadFileSize}
           jobStatus={jobStatus}
           summary={uploadSummary}
+          pollReconnecting={pollReconnecting}
           onClose={handleUploadModalClose}
           onApplyToDashboard={handleApplyToDashboard}
           onRefresh={handleRefreshImportStatus}

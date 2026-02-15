@@ -57,3 +57,56 @@ def ensure_ingest_job_error_columns(engine) -> None:
                 pass
             else:
                 logger.warning("Could not add ingest_jobs.%s: %s", col, e)
+
+
+def ensure_ingest_job_finished_at(engine) -> None:
+    """Add finished_at column to ingest_jobs if missing (SQLite only). Idempotent."""
+    if engine.dialect.name != "sqlite":
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE ingest_jobs ADD COLUMN finished_at DATETIME"))
+            conn.commit()
+        logger.info("Added ingest_jobs.finished_at")
+    except Exception as e:  # noqa: BLE001
+        if "duplicate column name" in str(e).lower():
+            pass
+        else:
+            logger.warning("Could not add ingest_jobs.finished_at: %s", e)
+
+
+def ensure_ingest_job_phase(engine) -> None:
+    """Add phase column to ingest_jobs if missing (SQLite only). Idempotent."""
+    if engine.dialect.name != "sqlite":
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE ingest_jobs ADD COLUMN phase VARCHAR(32)"))
+            conn.commit()
+        logger.info("Added ingest_jobs.phase")
+    except Exception as e:  # noqa: BLE001
+        if "duplicate column name" in str(e).lower():
+            pass
+        else:
+            logger.warning("Could not add ingest_jobs.phase: %s", e)
+
+
+def ensure_ingest_job_worker_columns(engine) -> None:
+    """Add started_at, cancel_requested, device_key to ingest_jobs if missing (SQLite only). Idempotent."""
+    if engine.dialect.name != "sqlite":
+        return
+    for col, typ in [
+        ("started_at", "DATETIME"),
+        ("cancel_requested", "BOOLEAN"),
+        ("device_key", "VARCHAR(255)"),
+    ]:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(f"ALTER TABLE ingest_jobs ADD COLUMN {col} {typ}"))
+                conn.commit()
+            logger.info("Added ingest_jobs.%s", col)
+        except Exception as e:  # noqa: BLE001
+            if "duplicate column name" in str(e).lower():
+                pass
+            else:
+                logger.warning("Could not add ingest_jobs.%s: %s", col, e)

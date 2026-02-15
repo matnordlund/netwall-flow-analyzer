@@ -331,14 +331,18 @@ class RouterMac(Base):
 
 
 class IngestJob(Base):
-    """Async upload/ingest job for syslog file imports. Status: queued | uploading | processing | done | error."""
+    """Async upload/ingest job for syslog file imports. Status: queued | uploading | running | done | error | canceled."""
     __tablename__ = "ingest_jobs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)  # UUID
     status: Mapped[str] = mapped_column(String(32), index=True, default="queued")
+    phase: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)  # parsing | finalizing (optional override)
     filename: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     bytes_total: Mapped[int] = mapped_column(Integer, default=0)
     bytes_received: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    device_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)  # canonical firewall key (HA)
 
     lines_total: Mapped[int] = mapped_column(Integer, default=0)
     lines_processed: Mapped[int] = mapped_column(Integer, default=0)
@@ -358,6 +362,7 @@ class IngestJob(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MaintenanceJob(Base):

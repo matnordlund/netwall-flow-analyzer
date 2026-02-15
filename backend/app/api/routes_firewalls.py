@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from ..api.device_resolve import resolve_device
+from ..api.routes_ingest import _device_key_from_detected, _phase_from_status, _progress_from_job
 from ..storage.models import (
     Classification,
     DeviceIdentification,
@@ -111,6 +112,33 @@ def list_firewalls(request: Request):
         for inv in db.execute(select(FirewallInventory)).scalars().all():
             inventory_map[inv.device_key] = inv
 
+        # Active import jobs: group by device_key (jobs with no device_key yet are "pending")
+        active_jobs = db.execute(
+            select(IngestJob).where(
+                IngestJob.status.in_(["queued", "uploading", "running"])
+            ).order_by(IngestJob.created_at.desc())
+        ).scalars().all()
+        device_to_jobs: Dict[str, List[Dict[str, Any]]] = {}
+        pending_import_jobs: List[Dict[str, Any]] = []
+        for job in active_jobs:
+            summary = {
+                "job_id": job.id,
+                "filename": job.filename,
+                "status": job.status,
+                "phase": _phase_from_status(job.status),
+                "progress": round(_progress_from_job(job), 4),
+                "lines_processed": job.lines_processed,
+                "lines_total": job.lines_total,
+                "created_at": _iso(job.created_at),
+            }
+            dk = getattr(job, "device_key", None) or (
+                _device_key_from_detected(job.device_detected) if job.device_detected else None
+            )
+            if dk:
+                device_to_jobs.setdefault(dk, []).append(summary)
+            else:
+                pending_import_jobs.append(summary)
+
         # Stats per device_key: for single device_key is the device; for HA we need to query by members
         result: List[Dict[str, Any]] = []
         for device_key, default_label, members in firewall_rows:
@@ -141,6 +169,7 @@ def list_firewalls(request: Request):
             source_import = bool(inv and inv.source_import)
             last_import_ts = _iso(inv.last_import_ts) if inv and inv.last_import_ts else None
 
+            active_jobs_for_device = device_to_jobs.get(device_key, [])
             result.append({
                 "device_key": device_key,
                 "display_name": display_name,
@@ -153,10 +182,51 @@ def list_firewalls(request: Request):
                     "import": source_import,
                     "last_import_ts": last_import_ts,
                 },
+                "is_importing": len(active_jobs_for_device) > 0,
+                "active_import_jobs": active_jobs_for_device,
             })
 
         result.sort(key=lambda x: (x["display_name"].lower(), x["device_key"]))
         return result
+    finally:
+        db.close()
+
+
+@router.get("/firewalls/{device_key}/import-jobs", response_model=List[Dict[str, Any]])
+def list_firewall_import_jobs(request: Request, device_key: str):
+    """List import jobs associated with this firewall (by device_key). For use in firewall details modal."""
+    db: Session = get_db(request)
+    try:
+        # Jobs where device_key matches (set by processor when device is detected)
+        stmt = (
+            select(IngestJob)
+            .where(IngestJob.device_key == device_key)
+            .order_by(IngestJob.created_at.desc())
+            .limit(50)
+        )
+        jobs = db.execute(stmt).scalars().all()
+        out: List[Dict[str, Any]] = []
+        for job in jobs:
+            out.append({
+                "job_id": job.id,
+                "filename": job.filename,
+                "status": job.status,
+                "phase": _phase_from_status(job.status),
+                "progress": round(_progress_from_job(job), 4),
+                "lines_processed": job.lines_processed,
+                "lines_total": job.lines_total,
+                "parse_ok": job.parse_ok,
+                "parse_err": job.parse_err,
+                "raw_logs_inserted": job.raw_logs_inserted,
+                "events_inserted": job.events_inserted,
+                "time_min": job.time_min,
+                "time_max": job.time_max,
+                "created_at": _iso(job.created_at),
+                "started_at": _iso(getattr(job, "started_at", None)),
+                "finished_at": _iso(job.finished_at),
+                "error_message": job.error_message,
+            })
+        return out
     finally:
         db.close()
 

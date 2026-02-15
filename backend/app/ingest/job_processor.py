@@ -6,6 +6,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.exc import MultipleResultsFound
@@ -19,6 +20,36 @@ from .reconstruct import SyslogIngestor, UploadCollector
 
 logger = logging.getLogger("netwall.ingest.job")
 
+
+def run_import_job(
+    job_id: str,
+    file_path: Path,
+    session_factory: Any,
+    config: AppConfig,
+    ingestor: SyslogIngestor,
+) -> None:
+    """Sync entry point for background thread: run process_ingest_job in a new event loop."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(
+            process_ingest_job(
+                job_id=job_id,
+                file_path=file_path,
+                session_factory=session_factory,
+                ingestor=ingestor,
+                config=config,
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("run_import_job %s failed: %s", job_id, e)
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:  # noqa: S110
+            pass
+        loop.close()
+
 def _infer_error_stage(exc: BaseException) -> str:
     """Infer pipeline stage from exception type for clearer UI."""
     name = type(exc).__name__
@@ -31,6 +62,77 @@ def _infer_error_stage(exc: BaseException) -> str:
     return "processing"
 
 
+def check_job_cancel_requested(session_factory: Any, job_id: str) -> bool:
+    """Return True if job has cancel_requested set. Safe to call from worker."""
+    db = session_factory()
+    try:
+        job = db.get(IngestJob, job_id)
+        return job is not None and bool(job.cancel_requested)
+    finally:
+        db.close()
+
+
+def _maybe_update_job_device(
+    session_factory: Any,
+    job_id: str,
+    collector: UploadCollector,
+) -> None:
+    """If job has no device_key yet and collector has a primary device, set device_key/device_display and commit."""
+    primary = collector.primary_device(None)
+    if not primary or primary == "unknown":
+        return
+    db = session_factory()
+    try:
+        job = db.get(IngestJob, job_id)
+        if not job or getattr(job, "device_key", None):
+            return
+        job.device_detected = primary
+        job.device_key = get_canonical_device_key(db, primary)
+        job.device_display = get_device_display_label(db, primary)
+        job.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        logger.info("Job detected firewall=%s job_id=%s", job.device_key, job_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to update job device: %s", e)
+    finally:
+        db.close()
+
+
+def _set_job_canceled(
+    session_factory: sessionmaker,
+    job_id: str,
+    file_path: Path,
+    lines_processed: int = 0,
+    collector: UploadCollector | None = None,
+) -> None:
+    """Set job status to canceled, set finished_at and counters, delete file."""
+    now = datetime.now(timezone.utc)
+    db = session_factory()
+    try:
+        job = db.get(IngestJob, job_id)
+        if job:
+            job.status = "canceled"
+            job.phase = None
+            job.finished_at = now
+            job.lines_processed = lines_processed
+            if collector is not None:
+                job.parse_ok = collector.parse_ok
+                job.parse_err = collector.parse_err
+                job.filtered_id = collector.filtered_id
+                job.raw_logs_inserted = collector.raw_logs_inserted
+                job.events_inserted = collector.events_inserted
+            job.updated_at = now
+            db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Failed to set job %s to canceled: %s", job_id, e)
+    finally:
+        db.close()
+    try:
+        file_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _set_job_error(
     session_factory: sessionmaker,
     job_id: str,
@@ -41,22 +143,25 @@ def _set_job_error(
     error_stage: str | None = None,
 ) -> None:
     """Set job status to error and persist; safe to call from anywhere."""
+    now = datetime.now(timezone.utc)
     db = session_factory()
     try:
         job = db.get(IngestJob, job_id)
         if job:
             job.status = "error"
+            job.phase = None
             job.error_message = (error_message or "Unknown error")[:1000]
             job.error_type = error_type
             job.error_stage = error_stage
             job.lines_processed = lines_processed
+            job.finished_at = now
             if collector is not None:
                 job.parse_ok = collector.parse_ok
                 job.parse_err = collector.parse_err
                 job.filtered_id = collector.filtered_id
                 job.raw_logs_inserted = collector.raw_logs_inserted
                 job.events_inserted = collector.events_inserted
-            job.updated_at = datetime.now(timezone.utc)
+            job.updated_at = now
             db.commit()
     except Exception as e:  # noqa: BLE001
         logger.exception("Failed to set job %s to error: %s", job_id, e)
@@ -81,7 +186,7 @@ async def process_ingest_job(
             if not job:
                 logger.warning("IngestJob %s not found", job_id)
                 return
-            job.status = "processing"
+            job.status = "running"
             job.updated_at = datetime.now(timezone.utc)
             db.commit()
         finally:
@@ -111,9 +216,20 @@ async def process_ingest_job(
             ingestor.upload_get_lines_processed = lambda: lines_processed
 
             # Stream file from disk line-by-line (64 KB read chunks; no full-file read)
+            CHECK_CANCEL_EVERY = 5000
+            if check_job_cancel_requested(session_factory, job_id):
+                _set_job_canceled(session_factory, job_id, file_path, 0, collector)
+                return
             with open(file_path, "rb") as f:
                 line_buffer = ""
                 while True:
+                    if lines_processed > 0 and lines_processed % CHECK_CANCEL_EVERY == 0:
+                        _maybe_update_job_device(session_factory, job_id, collector)
+                        if check_job_cancel_requested(session_factory, job_id):
+                            await ingestor.flush()
+                            _set_job_canceled(session_factory, job_id, file_path, lines_processed, collector)
+                            return
+                        logger.info("Job progress job_id=%s lines_processed=%s", job_id, lines_processed)
                     chunk = f.read(65536)
                     if not chunk:
                         break
@@ -128,8 +244,24 @@ async def process_ingest_job(
                 if line_buffer.strip():
                     lines_processed += 1
                     await ingestor.handle_line(line_buffer)
+            if check_job_cancel_requested(session_factory, job_id):
+                await ingestor.flush()
+                _set_job_canceled(session_factory, job_id, file_path, lines_processed, collector)
+                return
 
             await ingestor.flush()
+
+            # Set phase=finalizing so UI shows 100% + "Finalizing" before we set status=done
+            now_utc = datetime.now(timezone.utc)
+            db_fin = session_factory()
+            try:
+                j = db_fin.get(IngestJob, job_id)
+                if j and j.status == "running":
+                    j.phase = "finalizing"
+                    j.updated_at = now_utc
+                    db_fin.commit()
+            finally:
+                db_fin.close()
         finally:
             ingestor.upload_session = None
             ingestor.upload_writer = None
@@ -140,12 +272,15 @@ async def process_ingest_job(
             ingest_session.close()
 
         # Final job update and status=done on a new session (ingest session is closed, no lock)
+        now = datetime.now(timezone.utc)
         db = session_factory()
         try:
             job = db.get(IngestJob, job_id)
             if not job:
                 return
             job.status = "done"
+            job.phase = None
+            job.finished_at = now
             job.lines_total = lines_processed
             job.lines_processed = lines_processed
             job.parse_ok = collector.parse_ok
@@ -157,9 +292,10 @@ async def process_ingest_job(
             job.time_max = collector.time_max_iso()
             job.device_detected = collector.primary_device(None)
             job.device_display = get_device_display_label(db, job.device_detected)
-            job.updated_at = datetime.now(timezone.utc)
+            job.updated_at = now
             if job.device_detected:
                 device_key = get_canonical_device_key(db, job.device_detected)
+                job.device_key = device_key
                 first_ts = last_ts = None
                 if job.time_min:
                     try:
@@ -173,6 +309,10 @@ async def process_ingest_job(
                         pass
                 upsert_firewall_import(db, device_key, first_ts=first_ts, last_ts=last_ts)
             db.commit()
+            logger.info(
+                "Job finished state=done job_id=%s events_inserted=%s device_key=%s",
+                job_id, job.events_inserted, job.device_key,
+            )
         finally:
             db.close()
 
@@ -192,7 +332,14 @@ async def process_ingest_job(
         )
     finally:
         ingestor.upload_collector = None
+        # Delete file only if we did not already set canceled (which deletes it)
+        db = session_factory()
         try:
-            file_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+            job = db.get(IngestJob, job_id)
+            if job is None or job.status != "canceled":
+                try:
+                    file_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        finally:
+            db.close()

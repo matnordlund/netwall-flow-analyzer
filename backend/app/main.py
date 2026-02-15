@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import threading
 from typing import Optional
 
 import uvicorn
@@ -15,9 +16,16 @@ from .api import routes_firewalls, routes_graph, routes_ingest, routes_inventory
 from .api.routes_ingest import mark_stale_ingest_jobs_error
 from .ingest.syslog_udp import run_syslog_udp_server
 from .ingest.reconstruct import SyslogIngestor
+from .ingest.worker import run_worker_loop
 from .storage.db import init_engine_and_sessionmaker
 from .storage import models
-from .storage.flow_index import ensure_flows_unique_index, ensure_ingest_job_error_columns
+from .storage.flow_index import (
+    ensure_flows_unique_index,
+    ensure_ingest_job_error_columns,
+    ensure_ingest_job_finished_at,
+    ensure_ingest_job_phase,
+    ensure_ingest_job_worker_columns,
+)
 
 logger = logging.getLogger("netwall")
 
@@ -133,6 +141,9 @@ async def main_async(config: AppConfig) -> None:
     # Ensure flows table has unique index for upsert (existing DBs may lack it; SQLite only).
     ensure_flows_unique_index(engine)
     ensure_ingest_job_error_columns(engine)
+    ensure_ingest_job_finished_at(engine)
+    ensure_ingest_job_worker_columns(engine)
+    ensure_ingest_job_phase(engine)
 
     # Create app instance.
     app = create_app(config)
@@ -150,11 +161,25 @@ async def main_async(config: AppConfig) -> None:
         logger.info("Marked %d stale ingest job(s) as error on startup", n)
 
     shutdown_event = asyncio.Event()
+    worker_stop_event = threading.Event()
+
+    def on_signal() -> None:
+        shutdown_event.set()
+        worker_stop_event.set()
 
     loop = asyncio.get_running_loop()
-
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, shutdown_event.set)
+        loop.add_signal_handler(sig, on_signal)
+
+    # Single import worker: processes queued jobs one at a time.
+    routes_ingest._ensure_upload_dir()
+    worker_thread = threading.Thread(
+        target=run_worker_loop,
+        args=(SessionLocal, config, ingestor, worker_stop_event),
+        daemon=True,
+    )
+    worker_thread.start()
+    logger.info("Import worker thread started")
 
     # Run HTTP server, syslog receiver, and scheduled cleanup concurrently.
     await asyncio.gather(
