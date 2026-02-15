@@ -2410,7 +2410,7 @@ function DashboardDiagram({
                 layoutHeight: layoutH,
                 onToggle: () => toggleNodeExpanded(an.id),
                 onInspect: (row: { source_label?: string; dest_label?: string; src_ip?: string; dest_ip?: string; count?: number }) => setInspectModal({
-                  source_label: row.source_label ?? row.src_label ?? '',
+                  source_label: row.source_label ?? '',
                   dest_label: row.dest_label ?? '',
                   src_ip: row.src_ip ?? '',
                   dest_ip: row.dest_ip ?? '',
