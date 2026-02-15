@@ -15,7 +15,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Endpoint, Event, FirewallInventory, Flow, RawLog
+from .models import Endpoint, Event, Flow, RawLog
 
 logger = logging.getLogger("netwall.writer")
 
@@ -87,13 +87,8 @@ class Writer:
                 session.bulk_insert_mappings(RawLog, batch.raw_logs)
             if batch.events:
                 session.bulk_insert_mappings(Event, batch.events)
-            for fk in batch.firewall_keys:
-                n_events = sum(1 for e in batch.events if (e.get("firewall_key") or e.get("device") or "").strip() == fk)
-                logger.info(
-                    "Import firewall upsert: job_id=%s firewall_key=%s ingest_source=import events_attributed=%s target=firewall_inventory.device_key=%s",
-                    job_id, fk, n_events, fk,
-                )
-                self._upsert_firewall_inventory(session, fk)
+            # Do NOT upsert firewall inventory here: every device in the batch would get marked IMPORT.
+            # Only the job completion path marks the single detected firewall (job.device_detected) as import.
             ep_key_to_id = self._upsert_endpoints_from_events(session, batch.events)
             self._upsert_flows_from_events(session, batch.events, ep_key_to_id)
             session.commit()
@@ -102,43 +97,6 @@ class Writer:
             raise
         finally:
             session.close()
-
-    def _upsert_firewall_inventory(self, session: Session, device_key: str) -> None:
-        now = datetime.now(timezone.utc)
-        table = FirewallInventory.__table__
-        dialect = session.get_bind().dialect.name
-        values = {
-            "device_key": device_key,
-            "source_type": "import",
-            "source_syslog": 0,
-            "source_import": 1,
-            "first_seen_ts": now,
-            "last_seen_ts": now,
-            "last_import_ts": now,
-            "updated_at": now,
-        }
-        # On conflict: set has_import only; do NOT update source_type (so syslog row stays source_type=syslog)
-        if dialect == "postgresql":
-            ins = pg_insert(table).values(**values)
-            stmt = ins.on_conflict_do_update(
-                index_elements=["device_key"],
-                set_={
-                    "source_import": 1,
-                    "last_import_ts": now,
-                    "updated_at": now,
-                },
-            )
-        else:
-            ins = sqlite_insert(table).values(**values)
-            stmt = ins.on_conflict_do_update(
-                index_elements=["device_key"],
-                set_={
-                    "source_import": 1,
-                    "last_import_ts": now,
-                    "updated_at": now,
-                },
-            )
-        session.execute(stmt)
 
     def _upsert_endpoints_from_events(
         self, session: Session, events: list[dict]
