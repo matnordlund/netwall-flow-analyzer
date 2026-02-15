@@ -99,21 +99,23 @@ INT_FIELDS = {
 
 
 def normalize_mac(mac: Optional[str]) -> Optional[str]:
-    """Normalize a MAC address to uppercase hyphen-separated AA-BB-CC-DD-EE-FF format.
+    """Normalize a MAC address to uppercase hyphen-separated AA-BB-CC-DD-EE-FF.
 
-    Handles colon-separated (aa:bb:cc:dd:ee:ff), hyphen-separated (aa-bb-cc-dd-ee-ff),
-    dot-separated (aabb.ccdd.eeff), and bare hex (aabbccddeeff).
-    Returns None for empty / invalid input.
+    Handles colon, hyphen, dot, and bare hex (e.g. E8D7657CC36E → E8-D7-65-7C-C3-6E).
+    Returns None for empty, invalid (not 12 hex chars), or all-zero MAC.
     """
     if not mac:
         return None
-    cleaned = mac.strip().upper().replace(":", "").replace("-", "").replace(".", "")
+    # Strip and remove common separators
+    cleaned = mac.strip().upper()
+    for sep in (":", "-", ".", " "):
+        cleaned = cleaned.replace(sep, "")
     if not cleaned:
         return None
     if len(cleaned) != 12 or not all(c in "0123456789ABCDEF" for c in cleaned):
-        # Not a valid 6-byte MAC – return original stripped/uppercased as fallback
-        fallback = mac.strip().upper().replace(":", "-")
-        return fallback if fallback else None
+        return None
+    if cleaned == "000000000000":
+        return None
     return "-".join(cleaned[i : i + 2] for i in range(0, 12, 2))
 
 
@@ -196,6 +198,17 @@ def _parse_kv_from_string(segment: str) -> Dict[str, object]:
     return out
 
 
+# Fallback: extract hwsender/hwdest from anywhere in message (e.g. [ethernet hwsender=X hwdest=Y])
+_ETHERNET_MAC_RE = re.compile(
+    r"\bhwsender=(?P<val>[^\s\]]+)",
+    re.IGNORECASE,
+)
+_ETHERNET_MAC_DEST_RE = re.compile(
+    r"\bhwdest=(?P<val>[^\s\]]+)",
+    re.IGNORECASE,
+)
+
+
 def _parse_incontrol_message(msg: str) -> Dict[str, object]:
     """Parse InControl MSG: id= event= prefix plus key=value from all bracket blocks. Flatten; last write wins."""
     # Prefix (before first '['): id=600004 event=conn_open_natsat
@@ -205,6 +218,15 @@ def _parse_incontrol_message(msg: str) -> Dict[str, object]:
     for part in _extract_bracket_inner_parts("[" + rest):
         for key, val in _parse_kv_from_string(part).items():
             all_kv[key] = val
+    # Fallback: if ethernet block was parsed as key="ethernet" value="hwsender=X hwdest=Y", or format differs, scan full msg
+    if "hwsender" not in all_kv:
+        m = _ETHERNET_MAC_RE.search(msg)
+        if m:
+            all_kv["hwsender"] = m.group("val").strip()
+    if "hwdest" not in all_kv:
+        m = _ETHERNET_MAC_DEST_RE.search(msg)
+        if m:
+            all_kv["hwdest"] = m.group("val").strip()
     return all_kv
 
 
@@ -217,6 +239,17 @@ def _normalize_incontrol_kv(kv: Dict[str, object]) -> None:
     # Map srcuser -> srcusername for schema
     if "srcuser" in kv and "srcusername" not in kv:
         kv["srcusername"] = kv["srcuser"]
+    # If ethernet block was stored as single key (ethernet="hwsender=X hwdest=Y"), extract hwsender/hwdest
+    ethernet_val = kv.get("ethernet")
+    if isinstance(ethernet_val, str) and ethernet_val.strip():
+        for m in _ETHERNET_MAC_RE.finditer(ethernet_val):
+            if "hwsender" not in kv:
+                kv["hwsender"] = m.group("val").strip()
+            break
+        for m in _ETHERNET_MAC_DEST_RE.finditer(ethernet_val):
+            if "hwdest" not in kv:
+                kv["hwdest"] = m.group("val").strip()
+            break
 
 
 def _parse_record_incontrol(raw: str, config: AppConfig) -> Optional[ParsedRecord]:
@@ -468,13 +501,13 @@ def normalize_to_models(parsed: ParsedRecord, raw_text: str) -> Tuple[RawLog, Op
         recv_zone=_extract_str(kv, "connrecvzone"),
         src_ip=_extract_str(kv, "connsrcip"),
         src_port=_extract_int(kv, "connsrcport"),
-        src_mac=normalize_mac(_extract_str(kv, "connsrcmac")),
+        src_mac=normalize_mac(_extract_str_any(kv, "connsrcmac", "hwsender")),
         src_device=_extract_str(kv, "connsrcdevice"),
         dest_if=_extract_str(kv, "conndestif"),
         dest_zone=_extract_str(kv, "conndestzone"),
         dest_ip=_extract_str(kv, "conndestip"),
         dest_port=_extract_int(kv, "conndestport"),
-        dest_mac=normalize_mac(_extract_str(kv, "conndestmac")),
+        dest_mac=normalize_mac(_extract_str_any(kv, "conndestmac", "hwdest")),
         dest_device=_extract_str(kv, "conndestdevice"),
         xlat_src_ip=_extract_str(kv, "connnewsrcip"),
         xlat_src_port=_extract_int(kv, "connnewsrcport"),
@@ -847,6 +880,14 @@ class SyslogIngestor:
 
                 # Filter: only keep CONN (0060) and DEVICE (0890)
                 if rec_id and not any(rec_id.startswith(p) for p in _ACCEPTED_ID_PREFIXES):
+                    ingest_stats.records_filtered_id += 1
+                    if self.upload_collector is not None:
+                        self.upload_collector.filtered_id += 1
+                    continue
+
+                # InControl: only import CONN and DEVICE log types (exclude RULE, ALG, etc.)
+                log_type = (parsed.extra.get("log_type") or "").strip().upper()
+                if log_type and log_type not in ("CONN", "DEVICE"):
                     ingest_stats.records_filtered_id += 1
                     if self.upload_collector is not None:
                         self.upload_collector.filtered_id += 1
