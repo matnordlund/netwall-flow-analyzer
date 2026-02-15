@@ -727,6 +727,7 @@ class SyslogIngestor:
     upload_batch_size: int = 5000
     upload_job_id: Optional[str] = field(default=None, repr=False)
     upload_get_lines_processed: Optional[Any] = field(default=None, repr=False)  # callable returning int (lines_processed)
+    upload_seen_event_keys: Optional[set] = field(default=None, repr=False)  # dedup: (device, ts_iso, type, src_ip, dest_ip, dest_port)
 
     async def handle_line(self, line: str) -> None:
         records = self.reconstructor.feed_line(line)
@@ -919,6 +920,25 @@ class SyslogIngestor:
                             unclassified_counter=unclassified_counter,
                         )
                         if batch_mode and self.upload_event_batch is not None:
+                            # Dedup: same logical event (e.g. duplicate CONN lines) only stored once per import
+                            seen = self.upload_seen_event_keys
+                            if seen is not None:
+                                ts_iso = (
+                                    event_model.ts_utc.isoformat()
+                                    if getattr(event_model.ts_utc, "isoformat", None)
+                                    else str(event_model.ts_utc or "")
+                                )
+                                key = (
+                                    (event_model.device or "").strip(),
+                                    ts_iso,
+                                    (event_model.event_type or "").strip(),
+                                    (event_model.src_ip or "").strip(),
+                                    (event_model.dest_ip or "").strip(),
+                                    event_model.dest_port if event_model.dest_port is not None else -1,
+                                )
+                                if key in seen:
+                                    continue
+                                seen.add(key)
                             self.upload_event_batch.append(_event_to_dict(event_model))
                             if self.upload_flow_events is not None:
                                 self.upload_flow_events.append(event_model)
