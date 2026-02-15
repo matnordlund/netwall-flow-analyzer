@@ -15,7 +15,7 @@ from ..storage.event_writer import EventWriter
 from ..storage.writer import ParsedBatch, Writer as StorageWriter
 from ..storage.ha_canonical import canonical_firewall_key_import, canonical_firewall_key_syslog
 from ..storage.firewall_source import get_canonical_device_key, upsert_firewall_syslog
-from ..enrichment.classification import apply_direction_classification
+from ..enrichment.classification import apply_direction_classification, flush_unclassified_counter
 from ..aggregation.flows import update_flows_for_events_batch, update_flows_for_event
 from .stats import ingest_stats
 
@@ -837,6 +837,7 @@ class SyslogIngestor:
             or (self.upload_writer is not None and self.upload_session is not None)
         )
         db: Session = self.upload_session if (self.upload_session is not None) else self.sessionmaker()
+        unclassified_counter: Dict[Tuple[str, str, Optional[str]], int] = {}
         try:
             for raw_text in records:
                 ingest_stats.records_processed += 1
@@ -915,6 +916,7 @@ class SyslogIngestor:
                             db=db,
                             event=event_model,
                             precedence=self.config.classification_precedence,
+                            unclassified_counter=unclassified_counter,
                         )
                         if batch_mode and self.upload_event_batch is not None:
                             self.upload_event_batch.append(_event_to_dict(event_model))
@@ -926,6 +928,8 @@ class SyslogIngestor:
                         ingest_stats.events_saved += 1
                         if self.upload_collector is not None:
                             self.upload_collector.record_event(parsed.device, parsed.ts_utc)
+
+            flush_unclassified_counter(db, unclassified_counter)
 
             if not batch_mode or self.upload_session is None:
                 try:

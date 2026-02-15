@@ -20,6 +20,7 @@ from .models import Endpoint, Event, Flow, RawLog
 
 logger = logging.getLogger("netwall.writer")
 
+ENDPOINT_UQ = ["device", "ip", "mac"]
 FLOW_IDENTITY = [
     "device", "basis", "from_value", "to_value", "proto", "dest_port",
     "src_endpoint_id", "dst_endpoint_id", "view_kind",
@@ -143,22 +144,39 @@ class Writer:
         mac: Optional[str],
         device_name: Optional[str],
     ) -> None:
-        """Merge-if-exists: find by (device, ip, mac) with IS NULL for mac; update or insert.
-        Prevents duplicate rows when mac is NULL (PostgreSQL UNIQUE allows multiple NULLs)."""
-        existing = get_endpoint_by_device_ip_mac(session, device, ip, mac)
-        if existing is not None:
-            # Update only empty metadata
-            if device_name and not (existing.device_name or "").strip():
-                existing.device_name = device_name
-            return
-        session.add(
-            Endpoint(
-                device=device,
-                ip=ip,
-                mac=mac,
-                device_name=device_name,
-            )
-        )
+        """Upsert endpoint by (device, ip, mac). Uses ON CONFLICT DO NOTHING when nothing to update
+        so SQLite never gets empty set_ (ValueError). Merge-if-exists for NULL mac."""
+        table = Endpoint.__table__
+        dialect = session.get_bind().dialect.name
+        values: dict[str, Any] = {
+            "device": device,
+            "ip": ip,
+            "mac": mac,
+            "device_name": device_name,
+        }
+        set_: dict[str, Any] = {}
+        if device_name and str(device_name).strip():
+            set_["device_name"] = device_name
+
+        if dialect == "postgresql":
+            ins = pg_insert(table).values(**values)
+            if set_:
+                stmt = ins.on_conflict_do_update(
+                    constraint="uq_endpoint_device_ip_mac",
+                    set_=set_,
+                )
+            else:
+                stmt = ins.on_conflict_do_nothing(constraint="uq_endpoint_device_ip_mac")
+        else:
+            ins = sqlite_insert(table).values(**values)
+            if set_:
+                stmt = ins.on_conflict_do_update(
+                    index_elements=ENDPOINT_UQ,
+                    set_=set_,
+                )
+            else:
+                stmt = ins.on_conflict_do_nothing(index_elements=ENDPOINT_UQ)
+        session.execute(stmt)
 
     def _upsert_flows_from_events(
         self,
