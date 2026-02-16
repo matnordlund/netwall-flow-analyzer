@@ -8,11 +8,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
-from sqlalchemy import func, select
+from sqlalchemy import func
 from sqlalchemy.orm import Session, sessionmaker
 
 from .endpoint_lookup import get_endpoint_by_device_ip_mac

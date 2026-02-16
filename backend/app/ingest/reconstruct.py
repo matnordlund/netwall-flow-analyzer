@@ -13,7 +13,7 @@ from ..config import AppConfig
 from ..storage.models import DeviceIdentification, Endpoint, Event, IngestJob, RawLog
 from ..storage.event_writer import EventWriter
 from ..storage.writer import ParsedBatch, Writer as StorageWriter
-from ..storage.ha_canonical import canonical_firewall_key_import, canonical_firewall_key_syslog
+from ..storage.ha_canonical import canonical_firewall_key_import
 from ..storage.firewall_source import get_canonical_device_key, upsert_firewall_syslog
 from ..enrichment.classification import apply_direction_classification, flush_unclassified_counter
 from ..aggregation.flows import update_flows_for_events_batch, update_flows_for_event

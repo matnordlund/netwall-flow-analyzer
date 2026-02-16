@@ -8,7 +8,6 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Upload
 from sqlalchemy import update
 
 from ..api.routes_zones import HA_MASTER_SUFFIX, HA_SLAVE_SUFFIX
-from ..ingest.job_processor import run_import_job
 from ..ingest.stats import ingest_stats
 from ..storage.models import IngestJob
 
