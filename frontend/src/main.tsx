@@ -3606,7 +3606,18 @@ function FirewallInventoryPage({ onOpenImportStatus }: { onOpenImportStatus?: (j
     },
     refetchInterval: 2000,
   });
-  const [dismissedImportJobIds, setDismissedImportJobIds] = useState<Set<string>>(() => new Set());
+  const DISMISSED_IMPORT_JOBS_KEY = 'dismissed-import-job-ids';
+  const [dismissedImportJobIds, setDismissedImportJobIds] = useState<Set<string>>(() => {
+    try {
+      if (typeof localStorage === 'undefined') return new Set();
+      const raw = localStorage.getItem(DISMISSED_IMPORT_JOBS_KEY);
+      if (!raw) return new Set();
+      const parsed = JSON.parse(raw);
+      return new Set(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []);
+    } catch {
+      return new Set();
+    }
+  });
   const pendingImportJobs = React.useMemo(() => {
     const raw = activeJobsRaw ?? [];
     return raw.filter(
@@ -3616,7 +3627,15 @@ function FirewallInventoryPage({ onOpenImportStatus }: { onOpenImportStatus?: (j
     );
   }, [activeJobsRaw, dismissedImportJobIds]);
   const dismissImportJob = React.useCallback((jobId: string) => {
-    setDismissedImportJobIds((prev) => new Set(prev).add(jobId));
+    setDismissedImportJobIds((prev) => {
+      const next = new Set(prev).add(jobId);
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(DISMISSED_IMPORT_JOBS_KEY, JSON.stringify([...next]));
+        }
+      } catch (_) {}
+      return next;
+    });
   }, []);
   const list = Array.isArray(listRaw) ? listRaw : (listRaw as { firewalls?: FirewallRow[] })?.firewalls ?? [];
   const [searchInput, setSearchInput] = useState('');
