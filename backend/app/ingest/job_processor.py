@@ -203,6 +203,28 @@ async def process_ingest_job(
             )
             return
 
+        # Count lines so progress bar can show 0% → 100% during processing (same chunk size as read loop)
+        try:
+            lines_total = 0
+            with open(file_path, "rb") as f:
+                last = b""
+                for chunk in iter(lambda: f.read(65536), b""):
+                    lines_total += chunk.count(b"\n")
+                    last = chunk
+                if last and not last.endswith(b"\n"):
+                    lines_total += 1
+            db_lines = session_factory()
+            try:
+                j = db_lines.get(IngestJob, job_id)
+                if j:
+                    j.lines_total = lines_total
+                    j.updated_at = datetime.now(timezone.utc)
+                    db_lines.commit()
+            finally:
+                db_lines.close()
+        except Exception as e:
+            logger.warning("Could not pre-count lines for progress: %s", e)
+
         ingestor.upload_collector = collector
 
         # Batched ingest via storage Writer (Core upserts; one transaction per batch; SQLite writer lock).

@@ -3587,7 +3587,7 @@ function FirewallInventoryPage({ onOpenImportStatus }: { onOpenImportStatus?: (j
   const { data: activeJobsRaw } = useQuery({
     queryKey: ['ingest-jobs', 'active'],
     queryFn: async () => {
-      const res = await fetch(`${API}/ingest/jobs?state=queued,running&limit=50`);
+      const res = await fetch(`${API}/ingest/jobs?state=queued,running,done,error,canceled&limit=50`);
       if (!res.ok) return [];
       const json = await res.json();
       return (json?.jobs ?? []) as Array<{
@@ -3606,7 +3606,18 @@ function FirewallInventoryPage({ onOpenImportStatus }: { onOpenImportStatus?: (j
     },
     refetchInterval: 2000,
   });
-  const pendingImportJobs = (activeJobsRaw ?? []).filter((j) => !j.device_key);
+  const [dismissedImportJobIds, setDismissedImportJobIds] = useState<Set<string>>(() => new Set());
+  const pendingImportJobs = React.useMemo(() => {
+    const raw = activeJobsRaw ?? [];
+    return raw.filter(
+      (j) =>
+        !dismissedImportJobIds.has(j.job_id) &&
+        (!j.device_key || ['done', 'error', 'canceled'].includes(j.status ?? ''))
+    );
+  }, [activeJobsRaw, dismissedImportJobIds]);
+  const dismissImportJob = React.useCallback((jobId: string) => {
+    setDismissedImportJobIds((prev) => new Set(prev).add(jobId));
+  }, []);
   const list = Array.isArray(listRaw) ? listRaw : (listRaw as { firewalls?: FirewallRow[] })?.firewalls ?? [];
   const [searchInput, setSearchInput] = useState('');
   const debouncedSearch = useDebounce(searchInput, 250);
@@ -3711,6 +3722,7 @@ function FirewallInventoryPage({ onOpenImportStatus }: { onOpenImportStatus?: (j
           <ul className="space-y-3">
             {pendingImportJobs.map((j) => {
               const pct = j.progress != null ? Math.round(j.progress * 100) : null;
+              const isComplete = ['done', 'error', 'canceled'].includes(j.status ?? '');
               return (
                 <li key={j.job_id} className="rounded-lg border border-border bg-muted/20 p-2.5 text-sm">
                   <div className="flex flex-wrap items-center gap-2">
@@ -3718,8 +3730,17 @@ function FirewallInventoryPage({ onOpenImportStatus }: { onOpenImportStatus?: (j
                     <span className="text-xs text-muted-foreground">
                       {j.created_at ? new Date(j.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
                     </span>
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-700 dark:text-amber-300">{j.status ?? 'queued'}</span>
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${j.status === 'done' ? 'bg-green-500/20 text-green-700 dark:text-green-300' : j.status === 'error' ? 'bg-red-500/20 text-red-700 dark:text-red-300' : j.status === 'canceled' ? 'bg-muted text-muted-foreground' : 'bg-amber-500/20 text-amber-700 dark:text-amber-300'}`}>{j.status ?? 'queued'}</span>
                     {j.phase && <span className="text-xs text-muted-foreground">{j.phase}</span>}
+                    {isComplete && (
+                      <button
+                        type="button"
+                        onClick={() => dismissImportJob(j.job_id)}
+                        className="ml-auto text-xs px-2 py-1 rounded border border-border bg-background hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        Dismiss
+                      </button>
+                    )}
                   </div>
                   {(j.status === 'running' && (pct != null || (j.lines_processed != null && j.lines_processed > 0))) && (
                     <div className="flex items-center gap-2 mt-1.5">
@@ -3732,6 +3753,14 @@ function FirewallInventoryPage({ onOpenImportStatus }: { onOpenImportStatus?: (j
                       <span className="text-xs text-muted-foreground shrink-0">
                         {pct != null ? `${pct}%` : `${j.lines_processed ?? 0} lines`}
                       </span>
+                    </div>
+                  )}
+                  {j.status === 'done' && (
+                    <div className="flex items-center gap-2 mt-1.5">
+                      <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden min-w-[80px]">
+                        <div className="h-full bg-green-500 transition-all duration-200" style={{ width: '100%' }} />
+                      </div>
+                      <span className="text-xs text-muted-foreground shrink-0">100%</span>
                     </div>
                   )}
                   {j.status === 'queued' && <div className="mt-1 text-xs text-muted-foreground">Queued — will start when the current job finishes</div>}

@@ -237,18 +237,20 @@ def _phase_from_status(status: str) -> str:
 
 
 def _progress_from_job(job: IngestJob) -> float:
-    """Return 0.0–1.0 progress: bytes or lines based. Running jobs cap at 0.99 until done."""
+    """Return 0.0–1.0 progress: lines-based when processing, bytes when uploading. Running jobs cap at 0.99 until done."""
     if job.status == "running":
-        # Avoid showing 100% while still processing (bytes complete but commit pending)
-        if job.bytes_total and job.bytes_total > 0:
-            return min(0.99, (job.bytes_received or 0) / job.bytes_total)
+        # Prefer lines so bar goes 0% → 99% as lines are processed (lines_total set at job start)
         if job.lines_total and job.lines_total > 0:
             return min(0.99, (job.lines_processed or 0) / job.lines_total)
+        # Fallback: upload phase (bytes complete = 99% until worker sets lines_total)
+        if job.bytes_total and job.bytes_total > 0:
+            return min(0.99, (job.bytes_received or 0) / job.bytes_total)
         return 0.0
-    if job.bytes_total and job.bytes_total > 0:
-        return min(1.0, (job.bytes_received or 0) / job.bytes_total)
-    if job.lines_total and job.lines_total > 0:
-        return min(1.0, (job.lines_processed or 0) / job.lines_total)
+    if job.status == "done":
+        if job.lines_total and job.lines_total > 0:
+            return min(1.0, (job.lines_processed or 0) / job.lines_total)
+        if job.bytes_total and job.bytes_total > 0:
+            return min(1.0, (job.bytes_received or 0) / job.bytes_total)
     return 0.0
 
 
