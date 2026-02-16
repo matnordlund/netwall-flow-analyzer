@@ -75,6 +75,23 @@ def ensure_ingest_job_finished_at(engine) -> None:
             logger.warning("Could not add ingest_jobs.finished_at: %s", e)
 
 
+def ensure_events_bytes_bigint(engine) -> None:
+    """Alter events.bytes_orig, bytes_term, duration_s to BIGINT on PostgreSQL (avoids integer out of range). Idempotent."""
+    if engine.dialect.name != "postgresql":
+        return
+    for col in ("bytes_orig", "bytes_term", "duration_s"):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(f"ALTER TABLE events ALTER COLUMN {col} TYPE BIGINT"))
+                conn.commit()
+            logger.info("Altered events.%s to BIGINT", col)
+        except Exception as e:  # noqa: BLE001
+            if "same type" in str(e).lower() or "already" in str(e).lower():
+                pass
+            else:
+                logger.warning("Could not alter events.%s to BIGINT: %s", col, e)
+
+
 def ensure_event_ha_columns(engine) -> None:
     """Add device_member, firewall_key, ingest_source to events if missing. Idempotent."""
     for col, typ in [

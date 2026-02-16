@@ -5,6 +5,7 @@ from typing import Optional
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -71,9 +72,9 @@ class Event(Base):
     xlat_dest_ip: Mapped[Optional[str]] = mapped_column(String(64), index=True)
     xlat_dest_port: Mapped[Optional[int]] = mapped_column(Integer)
 
-    bytes_orig: Mapped[Optional[int]] = mapped_column(Integer)
-    bytes_term: Mapped[Optional[int]] = mapped_column(Integer)
-    duration_s: Mapped[Optional[int]] = mapped_column(Integer)
+    bytes_orig: Mapped[Optional[int]] = mapped_column(BigInteger)
+    bytes_term: Mapped[Optional[int]] = mapped_column(BigInteger)
+    duration_s: Mapped[Optional[int]] = mapped_column(BigInteger)
 
     app_name: Mapped[Optional[str]] = mapped_column(String(255))
     app_risk: Mapped[Optional[str]] = mapped_column(String(64))
