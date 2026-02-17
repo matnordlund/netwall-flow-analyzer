@@ -280,37 +280,45 @@ def list_endpoints(
     request: Request,
     device: str = Query(..., description="Device (syslog hostname) or ha:base for HA cluster"),
     kind: str = Query(..., pattern="^(zone|interface)$", description="zone or interface"),
+    time_from: Optional[datetime] = Query(None, description="ISO8601 start of time range (optional; when set, only zones/interfaces seen in range)"),
+    time_to: Optional[datetime] = Query(None, description="ISO8601 end of time range (optional)"),
 ):
     """Return distinct zone or interface names observed in logs for the given device.
 
     - kind=zone: distinct values from connrecvzone and conndestzone.
     - kind=interface: distinct values from connrecvif and conndestif.
     - device can be a single device name or ha:base for HA cluster.
+    - When time_from/time_to are provided, only values from events in that range are returned.
     """
     db: Session = get_db(request)
     try:
         device_list, _ = resolve_device(db, device)
         if not device_list:
             return []
+        base = [Event.device.in_(device_list)]
+        if time_from is not None:
+            base.append(Event.ts_utc >= _ensure_utc(time_from))
+        if time_to is not None:
+            base.append(Event.ts_utc <= _ensure_utc(time_to))
         if kind == "zone":
             q1 = select(Event.recv_zone).where(
-                Event.device.in_(device_list),
+                *base,
                 Event.recv_zone.isnot(None),
                 Event.recv_zone != "",
             )
             q2 = select(Event.dest_zone).where(
-                Event.device.in_(device_list),
+                *base,
                 Event.dest_zone.isnot(None),
                 Event.dest_zone != "",
             )
         else:
             q1 = select(Event.recv_if).where(
-                Event.device.in_(device_list),
+                *base,
                 Event.recv_if.isnot(None),
                 Event.recv_if != "",
             )
             q2 = select(Event.dest_if).where(
-                Event.device.in_(device_list),
+                *base,
                 Event.dest_if.isnot(None),
                 Event.dest_if != "",
             )

@@ -1545,25 +1545,31 @@ function DashboardPage({
   });
   const routerMacCount = routerMacRules.length;
 
-  const { data: zones = [] } = useQuery({
-    queryKey: ['endpoints', device, 'zone'],
+  const { data: zones = [], isLoading: zonesLoading } = useQuery({
+    queryKey: ['endpoints', device, 'zone', timeFrom, timeTo],
     queryFn: async () => {
-      const res = await fetch(`${API}/endpoints?device=${encodeURIComponent(device)}&kind=zone`);
+      const params = new URLSearchParams({ device, kind: 'zone' });
+      if (timeFrom) params.set('time_from', new Date(timeFrom).toISOString());
+      if (timeTo) params.set('time_to', new Date(timeTo).toISOString());
+      const res = await fetch(`${API}/endpoints?${params}`);
       if (!res.ok) return [];
       return res.json();
     },
-    enabled: !!device,
+    enabled: hasDeviceAndTime,
   });
-  const { data: interfaces = [] } = useQuery({
-    queryKey: ['endpoints', device, 'interface'],
+  const { data: interfaces = [], isLoading: interfacesLoading } = useQuery({
+    queryKey: ['endpoints', device, 'interface', timeFrom, timeTo],
     queryFn: async () => {
-      const res = await fetch(`${API}/endpoints?device=${encodeURIComponent(device)}&kind=interface`);
+      const params = new URLSearchParams({ device, kind: 'interface' });
+      if (timeFrom) params.set('time_from', new Date(timeFrom).toISOString());
+      if (timeTo) params.set('time_to', new Date(timeTo).toISOString());
+      const res = await fetch(`${API}/endpoints?${params}`);
       if (!res.ok) return [];
       return res.json();
     },
-    enabled: !!device,
+    enabled: hasDeviceAndTime,
   });
-  const { data: users = [] } = useQuery({
+  const { data: users = [], isLoading: usersLoading } = useQuery({
     queryKey: ['users', device, timeFrom, timeTo],
     queryFn: async () => {
       const fromISO = new Date(timeFrom).toISOString();
@@ -1576,7 +1582,7 @@ function DashboardPage({
     },
     enabled: hasDeviceAndTime,
   });
-  const { data: endpointList = [] } = useQuery({
+  const { data: endpointList = [], isLoading: endpointListLoading } = useQuery({
     queryKey: ['endpoints/list', device, timeFrom, timeTo],
     queryFn: async () => {
       const fromISO = new Date(timeFrom).toISOString();
@@ -1595,6 +1601,43 @@ function DashboardPage({
   const dstOptions =
     dstKind === 'zone' ? zones : dstKind === 'interface' ? interfaces : endpointList;
 
+  const isSrcOptionsLoading =
+    (srcKind === 'zone' && zonesLoading) ||
+    (srcKind === 'interface' && interfacesLoading) ||
+    (srcKind === 'user' && usersLoading) ||
+    (srcKind === 'endpoint' && endpointListLoading);
+  const isDstOptionsLoading =
+    (dstKind === 'zone' && zonesLoading) ||
+    (dstKind === 'interface' && interfacesLoading) ||
+    (dstKind === 'endpoint' && endpointListLoading);
+
+  const srcEmptyLabel =
+    hasDeviceAndTime && !isSrcOptionsLoading && Array.isArray(srcOptions) && srcOptions.length === 0
+      ? srcKind === 'user'
+        ? 'Users'
+        : srcKind === 'zone'
+          ? 'Zones'
+          : srcKind === 'interface'
+            ? 'Interfaces'
+            : srcKind === 'endpoint'
+              ? 'Devices'
+              : null
+      : null;
+  const dstEmptyLabel =
+    hasDeviceAndTime &&
+    dstKind !== 'any' &&
+    !isDstOptionsLoading &&
+    Array.isArray(dstOptions) &&
+    dstOptions.length === 0
+      ? dstKind === 'zone'
+        ? 'Zones'
+        : dstKind === 'interface'
+          ? 'Interfaces'
+          : dstKind === 'endpoint'
+            ? 'Devices'
+            : null
+      : null;
+
   React.useEffect(() => {
     if (srcKind === 'endpoint' && endpointList.length > 0) {
       const ids = new Set(endpointList.map((e: { id: number }) => String(e.id)));
@@ -1603,14 +1646,18 @@ function DashboardPage({
     if (srcKind === 'endpoint' && endpointList.length === 0 && srcValue) setSrcValue('');
     if (srcKind === 'user' && Array.isArray(users) && users.length > 0 && srcValue && !users.includes(srcValue)) setSrcValue('');
     if (srcKind === 'user' && Array.isArray(users) && users.length === 0 && srcValue) setSrcValue('');
-  }, [srcKind, endpointList, users, srcValue]);
+    if (srcKind === 'zone' && Array.isArray(zones) && zones.length === 0 && srcValue) setSrcValue('');
+    if (srcKind === 'interface' && Array.isArray(interfaces) && interfaces.length === 0 && srcValue) setSrcValue('');
+  }, [srcKind, endpointList, users, zones, interfaces, srcValue]);
   React.useEffect(() => {
     if (dstKind === 'endpoint' && endpointList.length > 0) {
       const ids = new Set(endpointList.map((e: { id: number }) => String(e.id)));
       if (dstValue && !ids.has(dstValue)) setDstValue('');
     }
     if (dstKind === 'endpoint' && endpointList.length === 0 && dstValue) setDstValue('');
-  }, [dstKind, endpointList, dstValue]);
+    if (dstKind === 'zone' && Array.isArray(zones) && zones.length === 0 && dstValue) setDstValue('');
+    if (dstKind === 'interface' && Array.isArray(interfaces) && interfaces.length === 0 && dstValue) setDstValue('');
+  }, [dstKind, endpointList, zones, interfaces, dstValue]);
 
   const deviceLabel = React.useMemo(() => {
     const g = (deviceGroups as { id: string; label: string }[]).find((x) => x.id === device);
@@ -1806,6 +1853,10 @@ function DashboardPage({
         srcOptions={srcOptions}
         dstOptions={dstOptions}
         endpointList={endpointList}
+        isSrcOptionsLoading={isSrcOptionsLoading}
+        isDstOptionsLoading={isDstOptionsLoading}
+        srcEmptyLabel={srcEmptyLabel}
+        dstEmptyLabel={dstEmptyLabel}
         showInventory={showInventory}
         setShowInventory={setShowInventory}
         routerMacCount={routerMacCount}

@@ -83,6 +83,10 @@ export type AnalysisPanelDrawerProps = {
   srcOptions: string[] | { id: number; label: string; device_name?: string; ip: string }[];
   dstOptions: string[] | { id: number; label: string; device_name?: string; ip: string }[];
   endpointList: { id: number; label: string; device_name?: string; ip: string }[];
+  isSrcOptionsLoading?: boolean;
+  isDstOptionsLoading?: boolean;
+  srcEmptyLabel: string | null;
+  dstEmptyLabel: string | null;
   showInventory: boolean;
   setShowInventory: (v: boolean | ((prev: boolean) => boolean)) => void;
   routerMacCount: number;
@@ -234,7 +238,36 @@ export function AnalysisPanelDrawer(props: AnalysisPanelDrawerProps) {
               </FieldLabel>
             </div>
 
-            {/* Row 2: Source + Destination view + Dest (when Endpoints) */}
+            {/* Row 2: Time range (first so Zone/Interface/User dropdowns are filtered by date) */}
+            <div className="flex flex-wrap items-end gap-4 lg:col-span-2">
+              <FieldLabel label="From">
+                <input
+                  type="datetime-local"
+                  value={props.timeFrom}
+                  onChange={(e) => props.setTimeFrom(e.target.value)}
+                  className="h-9 rounded-lg border border-border bg-input px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/50 focus:border-ring"
+                />
+              </FieldLabel>
+              <FieldLabel label="To">
+                <input
+                  type="datetime-local"
+                  value={props.timeTo}
+                  onChange={(e) => props.setTimeTo(e.target.value)}
+                  className="h-9 rounded-lg border border-border bg-input px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/50 focus:border-ring"
+                />
+              </FieldLabel>
+              <FieldLabel label="View">
+                <StyledSelect
+                  value={props.view}
+                  onChange={(v) => props.setView(v as 'original' | 'translated')}
+                >
+                  <option value="original">Original</option>
+                  <option value="translated">Translated</option>
+                </StyledSelect>
+              </FieldLabel>
+            </div>
+
+            {/* Row 3: Source + Destination view + Dest (when Endpoints) */}
             <div className="flex flex-wrap items-end gap-4">
               <FieldLabel label="Source type">
                 <StyledSelect
@@ -253,49 +286,58 @@ export function AnalysisPanelDrawer(props: AnalysisPanelDrawerProps) {
                 </StyledSelect>
               </FieldLabel>
               <FieldLabel label="Source">
-                <StyledSelect
-                  value={props.srcValue}
-                  onChange={props.setSrcValue}
-                  disabled={
-                    !hasDeviceSelected ||
-                    (props.srcKind === 'endpoint' && !props.hasDeviceAndTime) ||
-                    (props.srcKind === 'user' && !props.hasDeviceAndTime)
-                  }
-                  className="min-w-[120px]"
-                >
-                  <option value="">Select</option>
-                  {props.srcKind === 'user' ? (
-                    (props.srcOptions as string[]).map((u: string) => (
-                      <option key={u} value={u} title={u}>
-                        {u.length > 40 ? u.slice(0, 38) + '…' : u}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <StyledSelect
+                    value={props.srcValue}
+                    onChange={props.setSrcValue}
+                    disabled={
+                      !hasDeviceSelected ||
+                      (props.srcKind === 'endpoint' && !props.hasDeviceAndTime) ||
+                      (props.srcKind === 'user' && !props.hasDeviceAndTime) ||
+                      !!props.srcEmptyLabel
+                    }
+                    className="min-w-[120px]"
+                  >
+                    <option value="">Select</option>
+                    {props.srcKind === 'user' ? (
+                      (props.srcOptions as string[]).map((u: string) => (
+                        <option key={u} value={u} title={u}>
+                          {u.length > 40 ? u.slice(0, 38) + '…' : u}
+                        </option>
+                      ))
+                    ) : props.srcKind === 'endpoint' &&
+                    props.endpointList.length === 0 &&
+                    props.hasDeviceAndTime ? (
+                      <option value="" disabled>
+                        No devices with MAC
                       </option>
-                    ))
-                  ) : props.srcKind === 'endpoint' &&
-                  props.endpointList.length === 0 &&
-                  props.hasDeviceAndTime ? (
-                    <option value="" disabled>
-                      No devices with MAC
-                    </option>
-                  ) : props.srcKind === 'endpoint' ? (
-                    (props.srcOptions as { id: number; label: string; device_name?: string; ip: string }[]).map(
-                      (e) => {
-                        const name = (e.device_name ?? e.label ?? '').toString().trim();
-                        const displayLabel = name ? `${name} (${e.ip})` : e.ip ?? '';
-                        return (
-                          <option key={e.id} value={String(e.id)}>
-                            {displayLabel}
-                          </option>
-                        );
-                      }
-                    )
-                  ) : (
-                    (props.srcOptions as string[]).map((o: string) => (
-                      <option key={o} value={o}>
-                        {o}
-                      </option>
-                    ))
+                    ) : props.srcKind === 'endpoint' ? (
+                      (props.srcOptions as { id: number; label: string; device_name?: string; ip: string }[]).map(
+                        (e) => {
+                          const name = (e.device_name ?? e.label ?? '').toString().trim();
+                          const displayLabel = name ? `${name} (${e.ip})` : e.ip ?? '';
+                          return (
+                            <option key={e.id} value={String(e.id)}>
+                              {displayLabel}
+                            </option>
+                          );
+                        }
+                      )
+                    ) : (
+                      (props.srcOptions as string[]).map((o: string) => (
+                        <option key={o} value={o}>
+                          {o}
+                        </option>
+                      ))
+                    )}
+                  </StyledSelect>
+                  {props.isSrcOptionsLoading && (props.srcKind === 'zone' || props.srcKind === 'interface' || props.srcKind === 'user' || props.srcKind === 'endpoint') && (
+                    <span className="text-xs text-muted-foreground">Loading…</span>
                   )}
-                </StyledSelect>
+                  {props.srcEmptyLabel && (
+                    <span className="text-xs text-muted-foreground">No {props.srcEmptyLabel} in the selected time frame</span>
+                  )}
+                </div>
               </FieldLabel>
             </div>
 
@@ -325,83 +367,63 @@ export function AnalysisPanelDrawer(props: AnalysisPanelDrawerProps) {
                 </StyledSelect>
               </FieldLabel>
               <FieldLabel label="Destination">
-                <StyledSelect
-                  value={props.dstKind === 'any' ? '' : props.dstValue}
-                  onChange={props.setDstValue}
-                  disabled={
-                    !hasDeviceSelected ||
-                    props.dstKind === 'any' ||
-                    (props.dstKind === 'endpoint' && !props.hasDeviceAndTime)
-                  }
-                  className="min-w-[120px]"
-                >
-                  {props.dstKind === 'any' ? (
-                    <option value="">All destinations</option>
-                  ) : (
-                    <>
-                      <option value="">Select</option>
-                      {props.dstKind === 'endpoint' &&
-                      props.endpointList.length === 0 &&
-                      props.hasDeviceAndTime ? (
-                        <option value="" disabled>
-                          No devices with MAC
-                        </option>
-                      ) : props.dstKind === 'endpoint' ? (
-                        (
-                          props.dstOptions as {
-                            id: number;
-                            label: string;
-                            device_name?: string;
-                            ip: string;
-                          }[]
-                        ).map((e) => {
-                          const name = (e.device_name ?? e.label ?? '').toString().trim();
-                          const displayLabel = name ? `${name} (${e.ip})` : e.ip ?? '';
-                          return (
-                            <option key={e.id} value={String(e.id)}>
-                              {displayLabel}
-                            </option>
-                          );
-                        })
-                      ) : (
-                        (props.dstOptions as string[]).map((o: string) => (
-                          <option key={o} value={o}>
-                            {o}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <StyledSelect
+                    value={props.dstKind === 'any' ? '' : props.dstValue}
+                    onChange={props.setDstValue}
+                    disabled={
+                      !hasDeviceSelected ||
+                      props.dstKind === 'any' ||
+                      (props.dstKind === 'endpoint' && !props.hasDeviceAndTime) ||
+                      !!props.dstEmptyLabel
+                    }
+                    className="min-w-[120px]"
+                  >
+                    {props.dstKind === 'any' ? (
+                      <option value="">All destinations</option>
+                    ) : (
+                      <>
+                        <option value="">Select</option>
+                        {props.dstKind === 'endpoint' &&
+                        props.endpointList.length === 0 &&
+                        props.hasDeviceAndTime ? (
+                          <option value="" disabled>
+                            No devices with MAC
                           </option>
-                        ))
-                      )}
-                    </>
+                        ) : props.dstKind === 'endpoint' ? (
+                          (
+                            props.dstOptions as {
+                              id: number;
+                              label: string;
+                              device_name?: string;
+                              ip: string;
+                            }[]
+                          ).map((e) => {
+                            const name = (e.device_name ?? e.label ?? '').toString().trim();
+                            const displayLabel = name ? `${name} (${e.ip})` : e.ip ?? '';
+                            return (
+                              <option key={e.id} value={String(e.id)}>
+                                {displayLabel}
+                              </option>
+                            );
+                          })
+                        ) : (
+                          (props.dstOptions as string[]).map((o: string) => (
+                            <option key={o} value={o}>
+                              {o}
+                            </option>
+                          ))
+                        )}
+                      </>
+                    )}
+                  </StyledSelect>
+                  {props.isDstOptionsLoading && props.dstKind !== 'any' && (
+                    <span className="text-xs text-muted-foreground">Loading…</span>
                   )}
-                </StyledSelect>
-              </FieldLabel>
-            </div>
-
-            {/* Row 3: Time + View */}
-            <div className="flex flex-wrap items-end gap-4 lg:col-span-2">
-              <FieldLabel label="From">
-                <input
-                  type="datetime-local"
-                  value={props.timeFrom}
-                  onChange={(e) => props.setTimeFrom(e.target.value)}
-                  className="h-9 rounded-lg border border-border bg-input px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/50 focus:border-ring"
-                />
-              </FieldLabel>
-              <FieldLabel label="To">
-                <input
-                  type="datetime-local"
-                  value={props.timeTo}
-                  onChange={(e) => props.setTimeTo(e.target.value)}
-                  className="h-9 rounded-lg border border-border bg-input px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/50 focus:border-ring"
-                />
-              </FieldLabel>
-              <FieldLabel label="View">
-                <StyledSelect
-                  value={props.view}
-                  onChange={(v) => props.setView(v as 'original' | 'translated')}
-                >
-                  <option value="original">Original</option>
-                  <option value="translated">Translated</option>
-                </StyledSelect>
+                  {props.dstEmptyLabel && (
+                    <span className="text-xs text-muted-foreground">No {props.dstEmptyLabel} in the selected time frame</span>
+                  )}
+                </div>
               </FieldLabel>
             </div>
 
