@@ -296,9 +296,10 @@ def list_endpoints(
         if not device_list:
             return []
         base = [Event.device.in_(device_list)]
-        if time_from is not None:
+        # Only apply time filter when actual datetime (direct test calls pass Query(None) default)
+        if isinstance(time_from, datetime):
             base.append(Event.ts_utc >= _ensure_utc(time_from))
-        if time_to is not None:
+        if isinstance(time_to, datetime):
             base.append(Event.ts_utc <= _ensure_utc(time_to))
         if kind == "zone":
             q1 = select(Event.recv_zone).where(
