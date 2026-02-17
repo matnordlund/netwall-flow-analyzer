@@ -425,7 +425,7 @@ function EndpointNodeContent({
                         </tr>
                       </thead>
                       <tbody>
-                        {data.source_breakdown.flatMap((src: { source_label?: string; src_ip?: string; services?: Array<{ proto?: string; port?: number; app_name?: string | null; count?: number }> }, si: number) =>
+                        {data.source_breakdown.flatMap((src: { source_label?: string; src_ip?: string; src_kind?: string; src_value?: string; services?: Array<{ proto?: string; port?: number; app_name?: string | null; count?: number }> }, si: number) =>
                           (src.services || []).map((svc: { proto?: string; port?: number; app_name?: string | null; count?: number }, vi: number) => (
                             <tr key={`${si}-${vi}`} className={cn('border-b border-border/50', si % 2 === 0 && 'bg-muted/20')}>
                               <td className="px-1.5 py-1">{vi === 0 ? (src.source_label ?? '—') : ''}</td>
@@ -636,7 +636,7 @@ function ServiceNode({ id, data }: NodeProps) {
   const label = (data?.label ?? '—') as string;
   const appDisplay = data?.app != null && String(data.app).trim() !== '' ? String(data.app).trim() : '—';
   const count = Number(data?.count) ?? 0;
-  const byPair: Array<{ source_label?: string; dest_label?: string; src_ip?: string; dest_ip?: string; count?: number }> = Array.isArray(data?.by_pair) ? data.by_pair : [];
+  const byPair: Array<{ source_label?: string; dest_label?: string; src_ip?: string; dest_ip?: string; src_kind?: string; src_value?: string; count?: number }> = Array.isArray(data?.by_pair) ? data.by_pair : [];
 
   return (
     <>
@@ -787,7 +787,7 @@ function ServiceAppNode({ id, data }: NodeProps) {
   const label = (data?.label ?? '—') as string;
   const count = Number(data?.count) ?? 0;
   const destIpCount = data?.dest_ip_count != null ? Number(data.dest_ip_count) : undefined;
-  const byPair: Array<{ source_label?: string; dest_label?: string; src_ip?: string; dest_ip?: string; count?: number }> = Array.isArray(data?.by_pair) ? data.by_pair : [];
+  const byPair: Array<{ source_label?: string; dest_label?: string; src_ip?: string; dest_ip?: string; src_kind?: string; src_value?: string; count?: number }> = Array.isArray(data?.by_pair) ? data.by_pair : [];
 
   const [page, setPage] = useState(1);
 
