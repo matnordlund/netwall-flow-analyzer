@@ -77,6 +77,11 @@ def _event_matches_src(
         return (event.src_ip or "") == (src_endpoint.ip or "") and (
             (event.src_mac or "") == (src_endpoint.mac or "")
         )
+    if src_kind == "user":
+        u = (event.srcusername or "").strip()
+        if not u:
+            return False
+        return u == src_value if src_value else True
     return False
 
 
@@ -390,7 +395,7 @@ def _build_services_per_dest(
 def get_graph(
     request: Request,
     device: Optional[str] = Query(None, description="Source firewall (required for Analyze)"),
-    src_kind: Optional[str] = Query(None, pattern="^(side|zone|interface|endpoint)$"),
+    src_kind: Optional[str] = Query(None, pattern="^(side|zone|interface|endpoint|user)$"),
     src_value: Optional[str] = Query(None),
     dst_kind: Optional[str] = Query(None, pattern="^(side|zone|interface|endpoint|any)$"),
     dst_value: Optional[str] = Query(None),
@@ -499,16 +504,23 @@ def get_inspect_logs(
     proto: str = Query(..., description="TCP or UDP"),
     dest_port: int = Query(..., ge=0, le=65535),
     app_name: Optional[str] = Query(None),
-    src_ip: str = Query(..., description="Source IP (required; must be a valid IP address)"),
+    src_kind: Optional[str] = Query(None, description="Source filter kind: 'user' filters by srcusername"),
+    src_value: Optional[str] = Query(None, description="Source value (e.g. username when src_kind=user)"),
+    src_ip: Optional[str] = Query(None, description="Source IP (required when src_kind is not 'user')"),
     dest_ip: str = Query(..., description="Destination IP (required; must be a valid IP address)"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> Dict[str, Any]:
     """Return raw event rows (and raw log line when available) for a given service + source + destination.
     Uses same view logic as graph: original = src_ip/dest_ip/dest_port, translated = xlat_* where present.
+    When src_kind=user, filters by events.srcusername == src_value (src_ip ignored).
     """
-    if not _is_valid_ip(src_ip):
-        raise HTTPException(status_code=400, detail="src_ip must be a valid IP address")
+    use_user_filter = src_kind == "user" and src_value is not None and str(src_value).strip() != ""
+    if not use_user_filter:
+        if not src_ip:
+            raise HTTPException(status_code=400, detail="src_ip is required when src_kind is not 'user'")
+        if not _is_valid_ip(src_ip):
+            raise HTTPException(status_code=400, detail="src_ip must be a valid IP address")
     if not _is_valid_ip(dest_ip):
         raise HTTPException(status_code=400, detail="dest_ip must be a valid IP address")
     db = get_db(request)
@@ -529,14 +541,21 @@ def get_inspect_logs(
             .where(Event.ts_utc <= time_to)
             .where(Event.event_type.in_({"conn_open", "conn_open_natsat", "conn_close", "conn_close_natsat"}))
         )
+        if use_user_filter:
+            stmt = stmt.where(Event.srcusername.isnot(None))
+            stmt = stmt.where(Event.srcusername != "")
+            stmt = stmt.where(Event.srcusername == src_value.strip())
         if view == "translated":
             stmt = stmt.where(
-                or_(Event.xlat_src_ip == src_ip, Event.src_ip == src_ip),
                 or_(Event.xlat_dest_ip == dest_ip, Event.dest_ip == dest_ip),
                 or_(Event.xlat_dest_port == dest_port, Event.dest_port == dest_port),
             )
+            if not use_user_filter:
+                stmt = stmt.where(or_(Event.xlat_src_ip == src_ip, Event.src_ip == src_ip))
         else:
-            stmt = stmt.where(Event.src_ip == src_ip, Event.dest_ip == dest_ip, Event.dest_port == dest_port)
+            stmt = stmt.where(Event.dest_ip == dest_ip, Event.dest_port == dest_port)
+            if not use_user_filter:
+                stmt = stmt.where(Event.src_ip == src_ip)
         stmt = stmt.where((Event.proto == proto_upper) | (Event.proto.is_(None)))
         if app_name and str(app_name).strip():
             stmt = stmt.where((Event.app_name == app_name) | (Event.app_name == str(app_name).strip()))
@@ -573,6 +592,7 @@ def get_inspect_logs(
                 "proto": (e.proto or "").upper(),
                 "src_ip": e.src_ip,
                 "src_port": e.src_port,
+                "srcusername": e.srcusername,
                 "dest_ip": e.dest_ip,
                 "dest_port": e.dest_port,
                 "recv_if": e.recv_if,
@@ -695,7 +715,12 @@ def _get_graph_from_events(
         if _event_matches_src(e, src_kind, src_value, src_endpoint) and _event_matches_dst(e, dst_kind, dst_value or "", dst_endpoint)
     ]
 
-    AggKey = Tuple[int, int]
+    # For src_kind=user, only include events with non-empty srcusername
+    if src_kind == "user":
+        filtered = [e for e in filtered if (e.srcusername or "").strip()]
+
+    # agg key: (left_key, dst_ep_id). left_key = int (src_ep.id) for zone/interface/endpoint, str (username) for user
+    AggKey = Tuple[Any, int]
     agg: Dict[AggKey, Dict[str, Any]] = {}
     ep_cache: Dict[Tuple[str, str, Optional[str]], Optional[Endpoint]] = {}
 
@@ -722,6 +747,9 @@ def _get_graph_from_events(
     ig_local_ep_ids: Dict[str, set[int]] = {}         # ig_key -> set of local (has mac) ep ids
     ig_router_ep_ids: Dict[str, set[int]] = {}        # ig_key -> set of router (no mac) ep ids
 
+    def _safe_user_id(username: str) -> str:
+        return "src_user:" + re.sub(r"[^a-zA-Z0-9._@-]", "_", (username or "").strip()) or "unknown"
+
     for e in filtered:
         if view == "translated":
             src_ip = e.xlat_src_ip or e.src_ip
@@ -729,17 +757,26 @@ def _get_graph_from_events(
         else:
             src_ip = e.src_ip
             dst_ip = e.dest_ip
-        src_ep = get_ep(e.device, src_ip, e.src_mac)
         dst_ep = get_ep(e.device, dst_ip, e.dest_mac)
-        if src_ep is None or dst_ep is None:
+        if dst_ep is None:
             continue
-        if _event_has_src_mac(e):
-            src_ep_ids_with_mac.add(src_ep.id)
+        if src_kind == "user":
+            username = (e.srcusername or "").strip()
+            if not username:
+                continue
+            left_key: Any = username
+        else:
+            src_ep = get_ep(e.device, src_ip, e.src_mac)
+            if src_ep is None:
+                continue
+            left_key = src_ep.id
+            if _event_has_src_mac(e):
+                src_ep_ids_with_mac.add(src_ep.id)
         if _event_has_dest_mac(e):
             dest_ep_ids_with_mac.add(dst_ep.id)
 
-        # Aggregate (src, dst)
-        key: AggKey = (src_ep.id, dst_ep.id)
+        # Aggregate (left_key, dst)
+        key: AggKey = (left_key, dst_ep.id)
         if key not in agg:
             agg[key] = {
                 "count_open": 0, "count_close": 0,
@@ -784,9 +821,10 @@ def _get_graph_from_events(
 
     # ── Fetch endpoints ──
     all_ep_ids: set[int] = set()
-    for (sid, did) in agg:
-        all_ep_ids.add(sid)
+    for (left_key, did) in agg:
         all_ep_ids.add(did)
+        if isinstance(left_key, int):
+            all_ep_ids.add(left_key)
     endpoints: Dict[int, Endpoint] = {}
     if all_ep_ids:
         for ep in db.execute(select(Endpoint).where(Endpoint.id.in_(all_ep_ids))).scalars().all():
@@ -809,13 +847,23 @@ def _get_graph_from_events(
                 src_ip = e.src_ip
                 dst_ip = e.dest_ip
                 port = e.dest_port or 0
-            src_ep = get_ep(e.device, src_ip, e.src_mac)
             dst_ep = get_ep(e.device, dst_ip, e.dest_mac)
-            if src_ep is None or dst_ep is None:
+            if dst_ep is None:
                 continue
             proto = ((e.proto or "").strip() or "ip").upper()
-            app = app_by_key.get((src_ep.id, dst_ep.id, proto, port), "-") or "-"
-            svc_key: Tuple[str, int, str] = (proto, port, app)
+            if src_kind == "user":
+                left_key_svc: Any = (e.srcusername or "").strip()
+                if not left_key_svc:
+                    continue
+                app = "-"
+                pair_key_svc: Tuple[Any, int] = (left_key_svc, dst_ep.id)
+            else:
+                src_ep = get_ep(e.device, src_ip, e.src_mac)
+                if src_ep is None:
+                    continue
+                app = app_by_key.get((src_ep.id, dst_ep.id, proto, port), "-") or "-"
+                pair_key_svc = (src_ep.id, dst_ep.id)
+            svc_key = (proto, port, app)
             if svc_key not in svc_agg:
                 svc_agg[svc_key] = {"count_open": 0, "bytes_src_to_dst": 0, "bytes_dst_to_src": 0, "by_pair": {}, "dest_ips": set()}
             row = svc_agg[svc_key]
@@ -824,8 +872,7 @@ def _get_graph_from_events(
             row["bytes_dst_to_src"] += (e.bytes_term or 0) or 0
             if dst_ip:
                 row["dest_ips"].add(dst_ip)
-            pair_key = (src_ep.id, dst_ep.id)
-            row["by_pair"][pair_key] = row["by_pair"].get(pair_key, 0) + 1
+            row["by_pair"][pair_key_svc] = row["by_pair"].get(pair_key_svc, 0) + 1
 
     services_by_ep = _build_services_per_dest(
         db, device_list=device_list, filtered_open=filtered,
@@ -962,23 +1009,25 @@ def _get_graph_from_events(
         mac = (ep.mac or "").strip()
         return bool(mac and mac in router_src_macs)
 
-    # ── Compute seen_count per source endpoint (same metric as Endpoints "Seen") ──
-    src_seen_count: Dict[int, int] = {}
-    for (src_id, dst_id), row in agg.items():
-        src_seen_count[src_id] = src_seen_count.get(src_id, 0) + row["count_open"]
+    # ── Compute seen_count per source (endpoint id or username for user mode) ──
+    src_seen_count: Dict[Any, int] = {}
+    for (left_key, dst_id), row in agg.items():
+        src_seen_count[left_key] = src_seen_count.get(left_key, 0) + row["count_open"]
 
-    ha_mode = len(device_list) > 1
+    ha_mode = len(device_list) > 1 and src_kind != "user"
     canonical_by_src_id: Dict[int, str] = {}
     rep_left_by_canonical: Dict[str, Endpoint] = {}
     left_hidden_canonical_keys: set[str] = set()
 
     if ha_mode:
-        for (src_id, dst_id), _ in agg.items():
-            src_ep = endpoints.get(src_id)
+        for (left_key, dst_id), _ in agg.items():
+            if not isinstance(left_key, int):
+                continue
+            src_ep = endpoints.get(left_key)
             if not src_ep:
                 continue
             ck = _canonical_endpoint_key("left", src_ep.ip, src_ep.mac)
-            canonical_by_src_id[src_id] = ck
+            canonical_by_src_id[left_key] = ck
             if ck not in rep_left_by_canonical:
                 rep_left_by_canonical[ck] = src_ep
             if _is_src_router_mac(src_ep) or src_ep.id not in src_ep_ids_with_mac:
@@ -986,12 +1035,26 @@ def _get_graph_from_events(
 
     # ── Left nodes ──
     left_nodes: List[Dict[str, Any]] = []
-    left_seen: Dict[int, str] = {}
+    left_seen: Dict[Any, str] = {}
     left_hidden_ep_ids: set[int] = set()
     router_left_hidden: List[str] = []
     left_hidden_edges: List[Dict[str, Any]] = []
 
-    if ha_mode:
+    if src_kind == "user":
+        distinct_users = sorted(set(k for k, _ in agg.keys() if isinstance(k, str)))
+        for username in distinct_users:
+            node_id = _safe_user_id(username)
+            left_nodes.append({
+                "id": node_id,
+                "side": "left",
+                "type": "user",
+                "label": username,
+                "label_full": username,
+                "seen_count": src_seen_count.get(username, 0),
+            })
+            left_seen[username] = node_id
+        hidden_nodes_left = []
+    elif ha_mode:
         for ck, rep_ep in rep_left_by_canonical.items():
             if ck in left_hidden_canonical_keys:
                 continue
@@ -1013,10 +1076,12 @@ def _get_graph_from_events(
                 n = build_node(rep, "left")
                 n["id"] = ck
                 hidden_nodes_left.append(n)
-        left_hidden_ep_ids = set()  # unused when ha_mode for "if src_ep.id in left_hidden_ep_ids"; we use canonical
+        left_hidden_ep_ids = set()
     else:
-        for (src_id, dst_id), _ in agg.items():
-            src_ep = endpoints.get(src_id)
+        for (left_key, dst_id), _ in agg.items():
+            if not isinstance(left_key, int):
+                continue
+            src_ep = endpoints.get(left_key)
             if not src_ep:
                 continue
             if _is_src_router_mac(src_ep) or src_ep.id not in src_ep_ids_with_mac:
@@ -1085,21 +1150,25 @@ def _get_graph_from_events(
             pairs_sorted = sorted(by_pair_agg.items(), key=lambda p: -p[1])[:TOP_BY_PAIR]
             by_pair: List[Dict[str, Any]] = []
             for (src_id, dst_id), cnt in pairs_sorted:
-                src_ep = endpoints.get(src_id)
+                src_ep = endpoints.get(src_id) if isinstance(src_id, int) else None
                 dst_ep = endpoints.get(dst_id)
                 src_label = (src_ep.device_name or src_ep.ip or str(src_id)) if src_ep else str(src_id)
                 dst_label = (dst_ep.device_name or dst_ep.ip or str(dst_id)) if dst_ep else str(dst_id)
                 src_ip = (src_ep.ip or "").strip() if src_ep else ""
                 src_mac = (src_ep.mac or "").strip() if src_ep else ""
                 dest_ip = (dst_ep.ip or "").strip() if dst_ep else ""
-                by_pair.append({
+                entry: Dict[str, Any] = {
                     "source_label": src_label,
                     "dest_label": dst_label,
                     "src_ip": src_ip,
                     "src_mac": src_mac or None,
                     "dest_ip": dest_ip,
                     "count": cnt,
-                })
+                }
+                if src_kind == "user" and isinstance(src_id, str):
+                    entry["src_kind"] = "user"
+                    entry["src_value"] = src_id
+                by_pair.append(entry)
             app_label = app if app != "-" else "—"
             dest_ips = row.get("dest_ips") or set()
             service_app_nodes.append({
@@ -1121,15 +1190,20 @@ def _get_graph_from_events(
         # 4) Edges: left->fw, fw->svcport, svcport->svcapp
         edges_svc: List[Dict[str, Any]] = []
         left_to_fw: Dict[str, Dict[str, Any]] = {}
-        for (src_id, dst_id), row in agg.items():
-            src_ep = endpoints.get(src_id)
-            if not src_ep:
-                continue
-            if ha_mode:
-                ck = canonical_by_src_id.get(src_id)
-                source_id = "router-left" if (ck and ck in left_hidden_canonical_keys) else (ck or left_seen.get(src_id, f"left-{src_ep.id}"))
+        for (left_key, dst_id), row in agg.items():
+            if src_kind == "user":
+                source_id = _safe_user_id(left_key) if isinstance(left_key, str) else None
             else:
-                source_id = "router-left" if (src_ep.id in left_hidden_ep_ids) else left_seen.get(src_ep.id, f"left-{src_ep.id}")
+                src_ep = endpoints.get(left_key)
+                if not src_ep:
+                    continue
+                if ha_mode:
+                    ck = canonical_by_src_id.get(left_key)
+                    source_id = "router-left" if (ck and ck in left_hidden_canonical_keys) else (ck or left_seen.get(left_key, f"left-{src_ep.id}"))
+                else:
+                    source_id = "router-left" if (src_ep.id in left_hidden_ep_ids) else left_seen.get(src_ep.id, f"left-{src_ep.id}")
+            if source_id is None:
+                continue
             if source_id not in left_to_fw:
                 left_to_fw[source_id] = {"count_open": 0, "count_close": 0, "bytes_src_to_dst": 0, "bytes_dst_to_src": 0, "top_ports": {}, "top_rules": {}, "top_apps": {}, "last_seen": None}
             into = left_to_fw[source_id]
@@ -1174,8 +1248,10 @@ def _get_graph_from_events(
         left_hidden_edges_svc: List[Dict[str, Any]] = []
         if ha_mode:
             hidden_to_fw: Dict[str, Dict[str, Any]] = {}
-            for (src_id, dst_id), row in agg.items():
-                ck = canonical_by_src_id.get(src_id)
+            for (left_key, dst_id), row in agg.items():
+                if not isinstance(left_key, int):
+                    continue
+                ck = canonical_by_src_id.get(left_key)
                 if not ck or ck not in left_hidden_canonical_keys:
                     continue
                 if ck not in hidden_to_fw:
@@ -1200,8 +1276,10 @@ def _get_graph_from_events(
                 edges_svc.append(edge_row)
                 left_hidden_edges_svc.append(edge_row)
         else:
-            for (src_id, dst_id), row in agg.items():
-                src_ep = endpoints.get(src_id)
+            for (left_key, dst_id), row in agg.items():
+                if not isinstance(left_key, int):
+                    continue
+                src_ep = endpoints.get(left_key)
                 if not src_ep or src_ep.id not in left_hidden_ep_ids:
                     continue
                 edge_row = {
@@ -1273,7 +1351,7 @@ def _get_graph_from_events(
         router_hidden_nodes.sort(key=lambda n: (n.get("label") or "").lower())
 
         # Build router hidden edges (router -> device, per (src, dst) pair)
-        for (src_id, dst_id), row_data in agg.items():
+        for (left_key, dst_id), row_data in agg.items():
             if dst_id not in router_ids:
                 continue
             dst_ep = endpoints.get(dst_id)
@@ -1340,15 +1418,20 @@ def _get_graph_from_events(
 
     # Left -> Firewall (aggregate per source node)
     left_to_fw: Dict[str, Dict[str, Any]] = {}
-    for (src_id, dst_id), row in agg.items():
-        src_ep = endpoints.get(src_id)
-        if not src_ep:
-            continue
-        if ha_mode:
-            ck = canonical_by_src_id.get(src_id)
-            source_id = "router-left" if (ck and ck in left_hidden_canonical_keys) else (ck or left_seen.get(src_id, f"left-{src_ep.id}"))
+    for (left_key, dst_id), row in agg.items():
+        if src_kind == "user":
+            source_id = _safe_user_id(left_key) if isinstance(left_key, str) else None
         else:
-            source_id = "router-left" if (src_ep.id in left_hidden_ep_ids) else left_seen.get(src_ep.id, f"left-{src_ep.id}")
+            src_ep = endpoints.get(left_key)
+            if not src_ep:
+                continue
+            if ha_mode:
+                ck = canonical_by_src_id.get(left_key)
+                source_id = "router-left" if (ck and ck in left_hidden_canonical_keys) else (ck or left_seen.get(left_key, f"left-{src_ep.id}"))
+            else:
+                source_id = "router-left" if (src_ep.id in left_hidden_ep_ids) else left_seen.get(src_ep.id, f"left-{src_ep.id}")
+        if source_id is None:
+            continue
         if source_id not in left_to_fw:
             left_to_fw[source_id] = {"count_open": 0, "count_close": 0, "bytes_src_to_dst": 0, "bytes_dst_to_src": 0, "top_ports": {}, "top_rules": {}, "top_apps": {}, "last_seen": None}
         merge_row(left_to_fw[source_id], row)
@@ -1359,7 +1442,7 @@ def _get_graph_from_events(
 
     # Firewall -> InterfaceGroup (aggregate per group)
     fw_to_ig: Dict[str, Dict[str, Any]] = {}
-    for (src_id, dst_id), row in agg.items():
+    for (left_key, dst_id), row in agg.items():
         dst_ep = endpoints.get(dst_id)
         if not dst_ep:
             continue
@@ -1389,7 +1472,7 @@ def _get_graph_from_events(
             except ValueError:
                 pass
         ig_to_router_agg: Dict[str, Any] = {"count_open": 0, "count_close": 0, "bytes_src_to_dst": 0, "bytes_dst_to_src": 0, "top_ports": {}, "top_rules": {}, "top_apps": {}, "last_seen": None}
-        for (src_id, dst_id), row in agg.items():
+        for (left_key, dst_id), row in agg.items():
             if dst_id in router_ep_ids_set:
                 merge_row(ig_to_router_agg, row)
         if ig_to_router_agg.get("count_open") or ig_to_router_agg.get("bytes_src_to_dst"):
@@ -1432,8 +1515,10 @@ def _get_graph_from_events(
                 "top_services": top_svc[:3],
             })
     else:
-        for (src_id, dst_id), row in agg.items():
-            src_ep = endpoints.get(src_id)
+        for (left_key, dst_id), row in agg.items():
+            if not isinstance(left_key, int):
+                continue
+            src_ep = endpoints.get(left_key)
             if not src_ep or src_ep.id not in left_hidden_ep_ids:
                 continue
             ls = row.get("last_seen")

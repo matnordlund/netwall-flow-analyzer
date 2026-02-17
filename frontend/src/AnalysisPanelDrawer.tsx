@@ -7,7 +7,7 @@ import {
   Pencil,
 } from 'lucide-react';
 
-type FilterKind = 'zone' | 'interface' | 'endpoint' | 'any';
+type FilterKind = 'zone' | 'interface' | 'endpoint' | 'user' | 'any';
 
 function cn(...classes: (string | false | null | undefined)[]) {
   return classes.filter(Boolean).join(' ');
@@ -98,7 +98,9 @@ function getSummary(p: AnalysisPanelDrawerProps): string {
         ? `IF: ${p.srcValue || '—'}`
         : p.srcKind === 'endpoint'
           ? `Device: ${p.srcValue ? '…' : '—'}`
-          : '—';
+          : p.srcKind === 'user'
+            ? `User: ${p.srcValue ? (p.srcValue.length > 20 ? p.srcValue.slice(0, 18) + '…' : p.srcValue) : '—'}`
+            : '—';
   parts.push(srcLabel);
   parts.push('→');
   parts.push(p.destView === 'services' ? 'Services' : 'Endpoints');
@@ -245,6 +247,9 @@ export function AnalysisPanelDrawer(props: AnalysisPanelDrawerProps) {
                   <option value="endpoint" disabled={!props.hasDeviceAndTime}>
                     Device
                   </option>
+                  <option value="user" disabled={!props.hasDeviceAndTime}>
+                    User
+                  </option>
                 </StyledSelect>
               </FieldLabel>
               <FieldLabel label="Source">
@@ -253,12 +258,19 @@ export function AnalysisPanelDrawer(props: AnalysisPanelDrawerProps) {
                   onChange={props.setSrcValue}
                   disabled={
                     !hasDeviceSelected ||
-                    (props.srcKind === 'endpoint' && !props.hasDeviceAndTime)
+                    (props.srcKind === 'endpoint' && !props.hasDeviceAndTime) ||
+                    (props.srcKind === 'user' && !props.hasDeviceAndTime)
                   }
                   className="min-w-[120px]"
                 >
                   <option value="">Select</option>
-                  {props.srcKind === 'endpoint' &&
+                  {props.srcKind === 'user' ? (
+                    (props.srcOptions as string[]).map((u: string) => (
+                      <option key={u} value={u} title={u}>
+                        {u.length > 40 ? u.slice(0, 38) + '…' : u}
+                      </option>
+                    ))
+                  ) : props.srcKind === 'endpoint' &&
                   props.endpointList.length === 0 &&
                   props.hasDeviceAndTime ? (
                     <option value="" disabled>

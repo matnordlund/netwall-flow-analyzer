@@ -322,6 +322,37 @@ def list_endpoints(
         db.close()
 
 
+@router.get("/users", response_model=List[str])
+def list_users(
+    request: Request,
+    device: str = Query(..., description="Device or ha:base for HA cluster"),
+    time_from: Optional[datetime] = Query(None, description="ISO8601 start of time range"),
+    time_to: Optional[datetime] = Query(None, description="ISO8601 end of time range"),
+):
+    """Return distinct srcusername from events for the given device and time range.
+    Only returns non-empty usernames. Used for Dashboard Source Type = User."""
+    db: Session = get_db(request)
+    try:
+        device_list, _ = resolve_device(db, device)
+        if not device_list:
+            return []
+        stmt = (
+            select(Event.srcusername)
+            .where(Event.device.in_(device_list))
+            .where(Event.srcusername.isnot(None))
+            .where(Event.srcusername != "")
+        )
+        if time_from is not None:
+            stmt = stmt.where(Event.ts_utc >= _ensure_utc(time_from))
+        if time_to is not None:
+            stmt = stmt.where(Event.ts_utc <= _ensure_utc(time_to))
+        stmt = stmt.distinct().order_by(Event.srcusername)
+        rows = db.execute(stmt).scalars().all()
+        return _normalize_single_column_strings(rows)
+    finally:
+        db.close()
+
+
 @router.get("/endpoints/list", response_model=List[Dict[str, Any]])
 def list_endpoints_with_mac(
     request: Request,

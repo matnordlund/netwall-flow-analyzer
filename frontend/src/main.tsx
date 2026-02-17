@@ -43,6 +43,7 @@ import {
   Filter,
   Upload,
   Copy,
+  User,
 } from 'lucide-react';
 
 /* ── Layout constants ── */
@@ -432,7 +433,7 @@ function EndpointNodeContent({
                               <td className="px-1.5 py-1">{svc.app_name != null && String(svc.app_name).trim() !== '' ? String(svc.app_name).trim() : '—'}</td>
                               <td className="px-1.5 py-1 text-right tabular-nums">{svc.count ?? 0}</td>
                               <td className="w-7 px-0.5 py-1">
-                                {typeof data?.onInspect === 'function' && src.src_ip && data?.ip && (
+                                {typeof data?.onInspect === 'function' && (src.src_ip || (src.src_kind === 'user' && src.src_value)) && data?.ip && (
                                   <button
                                     type="button"
                                     onClick={(e) => {
@@ -440,6 +441,8 @@ function EndpointNodeContent({
                                       data.onInspect({
                                         source_label: src.source_label,
                                         src_ip: src.src_ip,
+                                        src_kind: src.src_kind,
+                                        src_value: src.src_value,
                                         proto: svc.proto ?? 'TCP',
                                         port: svc.port ?? 0,
                                         app_name: svc.app_name,
@@ -511,6 +514,30 @@ function LeftEndpointNode({ id, data }: NodeProps) {
         onToggle={data?.onToggle}
         isDestination={false}
       />
+    </>
+  );
+}
+
+function LeftUserNode({ id, data }: NodeProps) {
+  const label = (data?.label ?? id?.replace(/^src_user:/, '') ?? '—') as string;
+  const labelFull = (data?.label_full ?? label) as string;
+  const displayLabel = label.length > 28 ? label.slice(0, 26) + '…' : label;
+  return (
+    <>
+      <Handle type="source" position={Position.Right} id={HANDLE_RIGHT} />
+      <div
+        className="rounded-xl border border-border bg-card px-3 py-2 min-w-[100px] flex items-center gap-2 bg-violet-500/10 border-violet-500/30"
+        title={labelFull}
+        style={{ pointerEvents: 'auto' }}
+      >
+        <User className="w-4 h-4 shrink-0 text-violet-600 dark:text-violet-400" />
+        <span className="text-sm font-semibold text-card-foreground truncate min-w-0">
+          {displayLabel}
+        </span>
+        {data?.seen_count != null && (
+          <span className="text-xs text-muted-foreground shrink-0">{Number(data.seen_count).toLocaleString()}</span>
+        )}
+      </div>
     </>
   );
 }
@@ -658,7 +685,7 @@ function ServiceNode({ id, data }: NodeProps) {
                       <td className="px-1.5 py-1 truncate max-w-[80px]" title={row.dest_label ?? '—'}>{row.dest_label ?? '—'}</td>
                       <td className="px-1.5 py-1 text-right tabular-nums">{row.count ?? 0}</td>
                       <td className="w-7 px-0.5 py-1">
-                        {typeof data?.onInspect === 'function' && row.src_ip && row.dest_ip && (
+                        {typeof data?.onInspect === 'function' && ((row.src_ip && row.dest_ip) || (row.src_kind === 'user' && row.src_value && row.dest_ip)) && (
                           <button type="button" onClick={(e) => { e.stopPropagation(); data.onInspect(row); }} className="p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground" title="Inspect raw logs" aria-label="Inspect raw logs">
                             <Search className="w-3 h-3" />
                           </button>
@@ -846,7 +873,7 @@ function ServiceAppNode({ id, data }: NodeProps) {
                       <td className="px-2 py-1 w-[200px] min-w-[200px] whitespace-nowrap" title={row.dest_label ?? '—'}>{row.dest_label ?? '—'}</td>
                       <td className="px-2 py-1 w-[80px] min-w-[80px] text-right tabular-nums whitespace-nowrap">{row.count ?? 0}</td>
                       <td className="w-8 px-1 py-1">
-                        {typeof data?.onInspect === 'function' && row.src_ip && row.dest_ip && (
+                        {typeof data?.onInspect === 'function' && ((row.src_ip && row.dest_ip) || (row.src_kind === 'user' && row.src_value && row.dest_ip)) && (
                           <button
                             type="button"
                             onClick={(e) => { e.stopPropagation(); data.onInspect(row); }}
@@ -1075,7 +1102,7 @@ function InterfaceGroupNode({ data }: NodeProps) {
                                     <td className="px-1 py-0.5">{svc.app_name != null && String(svc.app_name).trim() !== '' ? String(svc.app_name).trim() : '—'}</td>
                                     <td className="px-1 py-0.5 text-right tabular-nums">{svc.count ?? 0}</td>
                                     <td className="w-6 px-0.5 py-0.5">
-                                      {typeof dev.onInspect === 'function' && src.src_ip && dev.ip && (
+                                      {typeof dev.onInspect === 'function' && (src.src_ip || (src.src_kind === 'user' && src.src_value)) && dev.ip && (
                                         <button
                                           type="button"
                                           onClick={(e) => {
@@ -1083,6 +1110,8 @@ function InterfaceGroupNode({ data }: NodeProps) {
                                             dev.onInspect({
                                               source_label: src.source_label,
                                               src_ip: src.src_ip,
+                                              src_kind: src.src_kind,
+                                              src_value: src.src_value,
                                               proto: svc.proto ?? 'TCP',
                                               port: svc.port ?? 0,
                                               app_name: svc.app_name,
@@ -1143,6 +1172,7 @@ function CollapsedSourcesNode({ data }: NodeProps) {
 
 const nodeTypes = {
   leftEndpoint: LeftEndpointNode,
+  leftUserNode: LeftUserNode,
   rightEndpoint: RightEndpointNode,
   firewall: FirewallNode,
   routerBucket: RouterBucketNode,
@@ -1161,7 +1191,7 @@ const queryClient = new QueryClient();
 
 const API = '/api';
 
-type FilterKind = 'zone' | 'interface' | 'endpoint' | 'any';
+type FilterKind = 'zone' | 'interface' | 'endpoint' | 'user' | 'any';
 
 /* ── Styled select wrapper ── */
 function StyledSelect({
@@ -1533,6 +1563,19 @@ function DashboardPage({
     },
     enabled: !!device,
   });
+  const { data: users = [] } = useQuery({
+    queryKey: ['users', device, timeFrom, timeTo],
+    queryFn: async () => {
+      const fromISO = new Date(timeFrom).toISOString();
+      const toISO = new Date(timeTo).toISOString();
+      const res = await fetch(
+        `${API}/users?device=${encodeURIComponent(device)}&time_from=${encodeURIComponent(fromISO)}&time_to=${encodeURIComponent(toISO)}`
+      );
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: hasDeviceAndTime,
+  });
   const { data: endpointList = [] } = useQuery({
     queryKey: ['endpoints/list', device, timeFrom, timeTo],
     queryFn: async () => {
@@ -1548,7 +1591,7 @@ function DashboardPage({
   });
 
   const srcOptions =
-    srcKind === 'zone' ? zones : srcKind === 'interface' ? interfaces : endpointList;
+    srcKind === 'zone' ? zones : srcKind === 'interface' ? interfaces : srcKind === 'user' ? users : endpointList;
   const dstOptions =
     dstKind === 'zone' ? zones : dstKind === 'interface' ? interfaces : endpointList;
 
@@ -1558,7 +1601,9 @@ function DashboardPage({
       if (srcValue && !ids.has(srcValue)) setSrcValue('');
     }
     if (srcKind === 'endpoint' && endpointList.length === 0 && srcValue) setSrcValue('');
-  }, [srcKind, endpointList, srcValue]);
+    if (srcKind === 'user' && Array.isArray(users) && users.length > 0 && srcValue && !users.includes(srcValue)) setSrcValue('');
+    if (srcKind === 'user' && Array.isArray(users) && users.length === 0 && srcValue) setSrcValue('');
+  }, [srcKind, endpointList, users, srcValue]);
   React.useEffect(() => {
     if (dstKind === 'endpoint' && endpointList.length > 0) {
       const ids = new Set(endpointList.map((e: { id: number }) => String(e.id)));
@@ -1930,6 +1975,8 @@ function InspectLogsModal({
   destLabel,
   srcIp,
   destIp,
+  srcKind,
+  srcValue,
 }: {
   open: boolean;
   onClose: () => void;
@@ -1942,24 +1989,27 @@ function InspectLogsModal({
   appName: string;
   sourceLabel: string;
   destLabel: string;
-  /** Canonical source IP for API (required; use label only for display) */
+  /** Canonical source IP for API (optional when srcKind=user) */
   srcIp: string;
   /** Canonical destination IP for API (required) */
   destIp: string;
+  /** When 'user', filter by srcusername via srcValue */
+  srcKind?: string;
+  srcValue?: string;
 }) {
   const [page, setPage] = useState(0);
   const limit = 100;
   const offset = page * limit;
+  const useUserFilter = srcKind === 'user' && !!srcValue?.trim();
 
   const { data, isLoading, isError, error } = useQuery({
-    queryKey: ['graph/inspect-logs', device, timeFrom, timeTo, view, proto, port, appName, srcIp, destIp, offset, limit],
+    queryKey: ['graph/inspect-logs', device, timeFrom, timeTo, view, proto, port, appName, srcIp, destIp, srcKind, srcValue, offset, limit],
     queryFn: async () => {
       const params = new URLSearchParams({
         device,
         view,
         proto: proto || 'TCP',
         dest_port: String(port),
-        src_ip: srcIp || '',
         dest_ip: destIp || '',
         limit: String(limit),
         offset: String(offset),
@@ -1967,20 +2017,27 @@ function InspectLogsModal({
       if (timeFrom) params.set('time_from', timeFrom);
       if (timeTo) params.set('time_to', timeTo);
       if (appName && appName !== '-' && appName.trim()) params.set('app_name', appName.trim());
+      if (useUserFilter) {
+        params.set('src_kind', 'user');
+        params.set('src_value', srcValue!.trim());
+      } else {
+        params.set('src_ip', srcIp || '');
+      }
       const res = await fetch(`${API}/graph/inspect-logs?${params}`);
       if (!res.ok) throw new Error(await res.text() || 'Failed to load logs');
       return res.json();
     },
-    enabled: open && !!device && !!timeFrom && !!timeTo && !!srcIp && !!destIp,
+    enabled: open && !!device && !!timeFrom && !!timeTo && !!destIp && (!!srcIp || useUserFilter),
   });
 
   const rows: any[] = data?.rows ?? [];
   const total: number = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / limit));
+  const showUserColumn = useUserFilter;
 
   React.useEffect(() => {
     if (open) setPage(0);
-  }, [open, srcIp, destIp, proto, port]);
+  }, [open, srcIp, destIp, srcKind, srcValue, proto, port]);
 
   if (!open) return null;
 
@@ -2020,6 +2077,7 @@ function InspectLogsModal({
                     <tr className="text-left text-muted-foreground">
                       <th className="px-2 py-1.5 font-medium">Time</th>
                       <th className="px-2 py-1.5 font-medium">Event</th>
+                      {showUserColumn && <th className="px-2 py-1.5 font-medium">User</th>}
                       <th className="px-2 py-1.5 font-medium">Src (ip:port)</th>
                       <th className="px-2 py-1.5 font-medium">Dst (ip:port)</th>
                       <th className="px-2 py-1.5 font-medium">Rule</th>
@@ -2030,7 +2088,7 @@ function InspectLogsModal({
                   </thead>
                   <tbody>
                     {rows.map((r: any, i: number) => (
-                      <InspectLogRow key={r.ts_utc + String(i)} row={r} />
+                      <InspectLogRow key={r.ts_utc + String(i)} row={r} showUserColumn={showUserColumn} />
                     ))}
                   </tbody>
                 </table>
@@ -2066,9 +2124,10 @@ function InspectLogsModal({
   );
 }
 
-function InspectLogRow({ row }: { row: any }) {
+function InspectLogRow({ row, showUserColumn }: { row: any; showUserColumn?: boolean }) {
   const [expandRaw, setExpandRaw] = useState(false);
   const raw = row.raw_line ?? '';
+  const colSpan = 8 + (showUserColumn ? 1 : 0);
   const fmtTs = (s: string | null) => {
     if (!s) return '—';
     try { return new Date(s).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'medium' }); } catch { return s; }
@@ -2078,6 +2137,7 @@ function InspectLogRow({ row }: { row: any }) {
       <tr className="border-b border-border/50 hover:bg-muted/30">
         <td className="px-2 py-1 whitespace-nowrap">{fmtTs(row.ts_utc)}</td>
         <td className="px-2 py-1">{row.event_type ?? '—'}</td>
+        {showUserColumn && <td className="px-2 py-1 truncate max-w-[140px]" title={row.srcusername ?? ''}>{row.srcusername ?? '—'}</td>}
         <td className="px-2 py-1 font-mono">{row.src_ip ?? '—'}:{row.src_port ?? '—'}</td>
         <td className="px-2 py-1 font-mono">{row.dest_ip ?? '—'}:{row.dest_port ?? '—'}</td>
         <td className="px-2 py-1 truncate max-w-[120px]" title={row.rule ?? ''}>{row.rule ?? '—'}</td>
@@ -2099,7 +2159,7 @@ function InspectLogRow({ row }: { row: any }) {
       </tr>
       {expandRaw && raw ? (
         <tr>
-          <td colSpan={8} className="px-2 py-1 bg-muted/40 font-mono text-[10px] break-all whitespace-pre-wrap align-top">
+          <td colSpan={colSpan} className="px-2 py-1 bg-muted/40 font-mono text-[10px] break-all whitespace-pre-wrap align-top">
             {raw}
           </td>
         </tr>
@@ -2135,7 +2195,7 @@ function DashboardDiagram({
   const [expandedServicePorts, setExpandedServicePorts] = useState<Set<string>>(new Set());
   const [showAllSources, setShowAllSources] = useState(false);
   const [expandedLeftRouter, setExpandedLeftRouter] = useState(false);
-  /** Inspect raw logs modal: row from "By source & destination" (canonical src_ip/dest_ip for API) */
+  /** Inspect raw logs modal: row from "By source & destination" (canonical src_ip/dest_ip or src_kind=user + src_value for API) */
   const [inspectModal, setInspectModal] = useState<{
     source_label: string;
     dest_label: string;
@@ -2144,6 +2204,8 @@ function DashboardDiagram({
     proto: string;
     port: number;
     app: string;
+    src_kind?: string;
+    src_value?: string;
   } | null>(null);
   /** Measured node dimensions for layout (firewall width drives right-column X) */
   const [nodeSizes, setNodeSizes] = useState<Record<string, { w: number; h: number }>>({});
@@ -2248,6 +2310,20 @@ function DashboardDiagram({
     const leftChildrenColumnNodes: any[] = []; // expanded left-router endpoints, one column to the left
 
     visibleSources.forEach((n: any) => {
+      const isUserNode = n.type === 'user' || (n.id && String(n.id).startsWith('src_user:'));
+      if (isUserNode) {
+        renderedNodeIds.add(n.id);
+        const userNode = {
+          id: n.id,
+          position: { x: LEFT_X, y: 0 },
+          data: { label: n.label, label_full: n.label_full ?? n.label, seen_count: n.seen_count },
+          type: 'leftUserNode',
+          style: { zIndex: 0 },
+        };
+        nodes.push(userNode);
+        leftColumnNodes.push(userNode);
+        return;
+      }
       const isNodeExpanded = expandedNodeIds.has(n.id);
       const layoutH = estimateNodeHeight(n, isNodeExpanded, false);
       renderedNodeIds.add(n.id);
@@ -2457,7 +2533,7 @@ function DashboardDiagram({
                 isExpanded: appExpanded,
                 layoutHeight: layoutH,
                 onToggle: () => toggleNodeExpanded(an.id),
-                onInspect: (row: { source_label?: string; dest_label?: string; src_ip?: string; dest_ip?: string; count?: number }) => setInspectModal({
+                onInspect: (row: { source_label?: string; dest_label?: string; src_ip?: string; dest_ip?: string; src_kind?: string; src_value?: string; count?: number }) => setInspectModal({
                   source_label: row.source_label ?? '',
                   dest_label: row.dest_label ?? '',
                   src_ip: row.src_ip ?? '',
@@ -2465,6 +2541,8 @@ function DashboardDiagram({
                   proto: ad.proto ?? 'TCP',
                   port: ad.port ?? 0,
                   app: ad.appKey ?? '-',
+                  src_kind: row.src_kind,
+                  src_value: row.src_value,
                 }),
               },
               type: 'serviceAppNode',
@@ -2522,7 +2600,7 @@ function DashboardDiagram({
           local_devices: localDevices.map((dev: any) => ({
             ...dev,
             onInspect: dev.ip
-              ? (row: { source_label?: string; src_ip?: string; proto?: string; port?: number; app_name?: string | null }) =>
+              ? (row: { source_label?: string; src_ip?: string; src_kind?: string; src_value?: string; proto?: string; port?: number; app_name?: string | null }) =>
                   setInspectModal({
                     source_label: row.source_label ?? '',
                     dest_label: dev.label ?? '',
@@ -2531,6 +2609,8 @@ function DashboardDiagram({
                     proto: row.proto ?? 'TCP',
                     port: row.port ?? 0,
                     app: (row.app_name != null && String(row.app_name).trim() !== '') ? String(row.app_name).trim() : '-',
+                    src_kind: row.src_kind,
+                    src_value: row.src_value,
                   })
               : undefined,
           })),
@@ -2606,7 +2686,7 @@ function DashboardDiagram({
                 onSetAsDest: onSetDestinationFilter ? () => onSetDestinationFilter(endpointIdFromNodeId(n.id)) : undefined,
                 isActiveSource: activeSourceEndpointId != null && activeSourceEndpointId === endpointIdFromNodeId(n.id),
                 isActiveDest: activeDestEndpointId != null && activeDestEndpointId === endpointIdFromNodeId(n.id),
-                onInspect: (row: { source_label?: string; src_ip?: string; proto?: string; port?: number; app_name?: string | null }) => setInspectModal({
+                onInspect: (row: { source_label?: string; src_ip?: string; src_kind?: string; src_value?: string; proto?: string; port?: number; app_name?: string | null }) => setInspectModal({
                   source_label: row.source_label ?? '',
                   dest_label: destLabel,
                   src_ip: row.src_ip ?? '',
@@ -2614,6 +2694,8 @@ function DashboardDiagram({
                   proto: row.proto ?? 'TCP',
                   port: row.port ?? 0,
                   app: (row.app_name != null && String(row.app_name).trim() !== '') ? String(row.app_name).trim() : '-',
+                  src_kind: row.src_kind,
+                  src_value: row.src_value,
                 }),
               },
               type: 'rightEndpoint',
@@ -2810,6 +2892,8 @@ function DashboardDiagram({
           destLabel={inspectModal.dest_label}
           srcIp={inspectModal.src_ip}
           destIp={inspectModal.dest_ip}
+          srcKind={inspectModal.src_kind}
+          srcValue={inspectModal.src_value}
         />
       )}
     </div>

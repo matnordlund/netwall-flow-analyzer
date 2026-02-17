@@ -236,9 +236,15 @@ def _normalize_incontrol_kv(kv: Dict[str, object]) -> None:
         v = kv.get(key)
         if isinstance(v, str) and v:
             kv[key] = v.strip().lower()
-    # Map srcuser -> srcusername for schema
-    if "srcuser" in kv and "srcusername" not in kv:
-        kv["srcusername"] = kv["srcuser"]
+    # Map srcuser -> srcusername and destuser -> destusername (InControl uses srcuser/destuser; syslog uses srcusername/destusername)
+    def _empty(s: object) -> bool:
+        if s is None:
+            return True
+        return not (str(s).strip())
+    if _empty(kv.get("srcusername")) and not _empty(kv.get("srcuser")):
+        kv["srcusername"] = str(kv["srcuser"]).strip()
+    if _empty(kv.get("destusername")) and not _empty(kv.get("destuser")):
+        kv["destusername"] = str(kv["destuser"]).strip()
     # If ethernet block was stored as single key (ethernet="hwsender=X hwdest=Y"), extract hwsender/hwdest
     ethernet_val = kv.get("ethernet")
     if isinstance(ethernet_val, str) and ethernet_val.strip():
@@ -447,6 +453,14 @@ def _extract_str_any(kv: Dict[str, object], *keys: str) -> Optional[str]:
     return None
 
 
+def _strip_opt(s: Optional[str]) -> Optional[str]:
+    """Return stripped string or None if empty."""
+    if s is None:
+        return None
+    t = s.strip()
+    return t if t else None
+
+
 def _extract_int(kv: Dict[str, object], key: str) -> Optional[int]:
     v = kv.get(key)
     if v is None:
@@ -483,6 +497,17 @@ def normalize_to_models(parsed: ParsedRecord, raw_text: str) -> Tuple[RawLog, Op
     kv = parsed.kv
     extra = dict(parsed.extra)
 
+    # Ensure srcusername/destusername from srcuser/destuser (InControl uses srcuser; syslog uses srcusername)
+    def _non_empty(s: object) -> str | None:
+        if s is None:
+            return None
+        t = str(s).strip()
+        return t if t else None
+    if not _non_empty(kv.get("srcusername")) and _non_empty(kv.get("srcuser")):
+        kv["srcusername"] = _non_empty(kv["srcuser"])
+    if not _non_empty(kv.get("destusername")) and _non_empty(kv.get("destuser")):
+        kv["destusername"] = _non_empty(kv["destuser"])
+
     event_type = _extract_str(kv, "event")
 
     # Base connection mapping
@@ -494,8 +519,8 @@ def normalize_to_models(parsed: ParsedRecord, raw_text: str) -> Tuple[RawLog, Op
         rule=_extract_str(kv, "rule"),
         satsrcrule=_extract_str(kv, "satsrcrule"),
         satdestrule=_extract_str(kv, "satdestrule"),
-        srcusername=_extract_str_any(kv, "srcusername", "srcuser"),
-        destusername=_extract_str(kv, "destusername"),
+        srcusername=_strip_opt(_extract_str_any(kv, "srcusername", "srcuser")),
+        destusername=_strip_opt(_extract_str_any(kv, "destusername", "destuser")),
         proto=_extract_str(kv, "connipproto"),
         recv_if=_extract_str(kv, "connrecvif"),
         recv_zone=_extract_str(kv, "connrecvzone"),
